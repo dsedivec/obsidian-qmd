@@ -35,7 +35,7 @@ const KILL_GRACE_MS = 5_000;
  * `KILL_GRACE_MS`, so that the SIGKILL has landed.
  */
 const STOPPED_WAIT_MS = 6_000;
-/** How long a recorded server has at load to answer health before it is taken for hung. */
+/** How long a recorded server has to answer health before the adoption takes it for hung. */
 const ADOPT_WAIT_MS = 3_000;
 const SHUT_DOWN = "The QMD server manager was shut down.";
 const CANCELLED = "The QMD server start was cancelled.";
@@ -49,18 +49,18 @@ interface StoppedGroup { pid: number; port: number; at: number }
 /**
  * Makes sure a QMD server is reachable and stops only its own. It is there for two things: that
  * the plugin never leaves behind a server it started, and that it never signals a process it did
- * not start or adopt. The cases in which a server it started can still be left behind are set
- * out as known limits in the design document, under "ServerManager".
+ * not start or adopt. The one case in which a server it started can still be left behind is set
+ * out as a known limit in the design document, under "ServerManager".
  *
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
- * `pending`, then in `owned`), or with one from a saved record that passed the checks in
- * `adoptIfOurs`: either it answered health (held in `owned`), or it never did and its command
- * line names this port's server (never held, only stopped). A server that merely answers health
- * is none of these, and is never signalled. A PID that was not spawned moments ago is checked
- * again right before SIGTERM, in `stopRecorded` and nowhere else. An owned PID is forgotten once
- * its launcher has exited and its process group is gone, so a PID that died and was reused is
- * not signalled either. Every PID here names a process group: the launcher leads it and the
- * server is in it.
+ * `pending`, then in `owned`), or with one from a saved record: either `adoptIfOurs` kept that
+ * server, because it answered health (held in `owned`), or it did not keep it and the server is
+ * the plugin's own beyond doubt, by a command line that names QMD's server on the record's own
+ * port (never held, only stopped). A server that merely answers health is none of these, and is
+ * never signalled. A PID that was not spawned moments ago is checked again right before SIGTERM,
+ * in `stopRecorded` and nowhere else. An owned PID is forgotten once its launcher has exited and
+ * its process group is gone, so a PID that died and was reused is not signalled either. Every
+ * PID here names a process group: the launcher leads it and the server is in it.
  *
  * It never spawns on a port while a group it has itself sent SIGTERM for that port is still
  * alive: such a group holds the port, and the new server could not bind it. Every SIGTERM is
@@ -75,13 +75,17 @@ interface StoppedGroup { pid: number; port: number; at: number }
  * first. While the adoption is asking the recorded server for health, a start waits; by its own
  * first health check that server has been adopted, stopped or struck from the record. The start
  * then goes on as usual: an adopted server answers, and a stopped one is a group to wait for.
- * With no saved record, or one that is cleared at once, there is nothing to wait for.
+ * With no saved record, or one that is settled at once, there is nothing to wait for.
  *
  * `stopIfOwned` and `dispose` also overtake work that is waiting: on a health answer, for a
  * stopped server to be gone, for a recorded server to answer, or for an adoption to settle. A
- * start does not go on to spawn, and an adoption does not go on to own or to signal. After
- * `dispose` the manager spawns nothing, owns nothing new and never arms the idle timer again;
- * only `stopIfOwned` still acts. A SIGKILL follow-up is the one timer `dispose` leaves alone.
+ * start does not go on to spawn, and an adoption does not go on to own. A `stopIfOwned` that
+ * overtakes the adoption settles the record itself, there and then, as the adoption would have
+ * for a server that never answered: nothing recorded is left for a later start to spawn beside.
+ * `dispose` on its own signals nothing and leaves the record, for the next load to examine.
+ * After `dispose` the manager spawns nothing, owns nothing new and never arms the idle timer
+ * again; only `stopIfOwned` still acts. A SIGKILL follow-up is the one timer `dispose` leaves
+ * alone.
  */
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
@@ -107,8 +111,11 @@ export class ServerManager {
   private readonly polls = new Set<() => void>();
   /** The one adoption this manager makes, once it has begun. */
   private adoption: Promise<void> | undefined;
-  /** True while that adoption is asking the recorded server for health. A start waits for it then. */
-  private adopting = false;
+  /**
+   * The record that adoption is asking about, for as long as it waits for that server to answer.
+   * A start waits meanwhile, and a stop that arrives settles the record itself.
+   */
+  private adopting: OwnedRecord | null = null;
 
   constructor(private readonly deps: ServerDeps) {}
 
@@ -173,13 +180,19 @@ export class ServerManager {
     // Returned by `spawnServer` and not yet exited, so this PID needs no identity check.
     if (starting?.pid !== undefined) this.terminate(starting.pid, starting.port);
     this.stopOwned();
+    // An adoption that is still asking is over, and its record is not left for later: the
+    // recorded server is stopped if it is beyond doubt the plugin's own, and the record is
+    // cleared either way. Left alone, it could be spawned beside by the next start.
+    const recorded = this.adopting;
+    this.adopting = null;
+    if (recorded) this.stopRecorded(recorded, "on-its-port");
   }
 
   /**
-   * Crash recovery, for a server recorded by an earlier session. One that answers health is taken
-   * back as owned. One that does not answer within three seconds, and is this port's server by
-   * its command line, is stopped: nothing else would ever stop it. Otherwise the record is
-   * cleared and nothing is signalled.
+   * Crash recovery, for a server recorded by an earlier session. One that is on the port now set,
+   * looks like a QMD server and answers health within three seconds is taken back as owned. Any
+   * other is not kept: it is stopped if it is beyond doubt the plugin's own, by the stricter test
+   * of `isServerOnItsPort`, and the record is cleared either way.
    *
    * It is made once. The first call does the work and every later call returns the same promise;
    * every start begins by calling it, so the first call is the plugin's at load or the first
@@ -191,44 +204,46 @@ export class ServerManager {
   }
 
   /**
-   * Decides before it returns whatever needs no waiting: with no record, or with a record that
-   * cannot be this port's server, the adoption has settled by then, and a start goes straight on
-   * to its health check. Only a record that is worth asking for health sets `adopting`.
+   * Decides before it returns whatever needs no waiting: with no record, or with a record of a
+   * server that cannot be kept, the adoption has settled by then, and a start goes straight on to
+   * its health check. Only a server that could be kept is asked for health, and sets `adopting`.
    */
   private adopt(): Promise<void> {
     try {
       if (this.disposed) return Promise.resolve();
       const record = this.deps.loadRecord();
       if (!record) return Promise.resolve();
-      // A group signal to PID 0 or 1 would reach the group of this process, or every process. Such
-      // a record is discarded before anything is asked about its PID.
-      const adoptable =
+      const keepable =
         isUsablePid(record.pid) && record.port === this.deps.getSettings().port && this.looksLikeQmdServer(record.pid);
-      if (!adoptable) {
-        this.deps.saveRecord(null);
+      if (!keepable) {
+        // On a port the plugin no longer uses, or not a QMD server at all. Whose it is does not
+        // depend on the port that is set now.
+        this.stopRecorded(record, "on-its-port");
         return Promise.resolve();
       }
-      this.adopting = true;
+      this.adopting = record;
       return this.settleRecorded(record).finally(() => {
-        this.adopting = false;
+        if (this.adopting === record) this.adopting = null;
       });
     } catch (error) {
       return Promise.reject(error);
     }
   }
 
-  /** Gives the recorded server its three seconds to answer, then owns it or stops it. */
+  /** Gives a recorded server that could be kept its three seconds to answer, then owns it or stops it. */
   private async settleRecorded(record: OwnedRecord): Promise<void> {
     const stops = this.stops;
     // A fair chance to answer: a server that is busy for a moment is still worth keeping.
     const answered = await this.poll(() => this.deps.health(record.port), ADOPT_WAIT_MS);
-    // Overtaken by a stop or a shutdown: own nothing, signal nothing, and leave the record for a
-    // later session. Nothing of this session can be owned or starting here: every start waits.
+    // A stop during the wait has settled the record itself, in `stopIfOwned`. A shutdown alone
+    // leaves it, and signals nothing: a disposed manager starts nothing more, and the next load
+    // examines the record. Nothing of this session can be owned or starting here: every start
+    // waits.
     if (this.disposed || this.stops !== stops) return;
     if (answered) this.own(record);
-    // Hung, and never owned by this session. With no health answer to vouch for it, it is
-    // signalled only if its command line names this very port; the record is cleared either way.
-    else this.stopRecorded(record, "on-this-port");
+    // Hung. With no health answer to vouch for it, it is signalled only if it is beyond doubt the
+    // plugin's own; the record is cleared either way.
+    else this.stopRecorded(record, "on-its-port");
   }
 
   /**
@@ -246,6 +261,9 @@ export class ServerManager {
     clearTimeout(this.idleTimer);
     this.pending?.abort();
     this.endPolls();
+    // The adoption is over, with its record left as it is: a `stopIfOwned` that follows finds no
+    // adoption to settle.
+    this.adopting = null;
   }
 
   private async start(listeners: StatusListener[]): Promise<void> {
@@ -258,7 +276,7 @@ export class ServerManager {
     // shutdown ends that wait of the adoption's, and so this one. An adoption that fails does not
     // fail the start: whoever calls `adoptIfOurs` is given the same failure.
     const adoption = this.adoptIfOurs().catch(() => {});
-    if (this.adopting) {
+    if (this.adopting !== null) {
       await adoption;
       if (this.disposed || this.stops !== stops) throw this.overtaken();
     }
@@ -412,12 +430,12 @@ export class ServerManager {
   }
 
   /**
-   * The one way to SIGTERM for a PID that was not spawned moments ago: the owned server's, or at
-   * load that of a recorded server which never answered. It is signalled only if it passes the
-   * identity test now, and it is forgotten either way.
+   * The one way to SIGTERM for a PID that was not spawned moments ago: the owned server's, or
+   * that of a recorded server which the adoption does not keep. It is signalled only if it
+   * passes the identity test now, and it is forgotten either way.
    */
-  private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-this-port"): void {
-    const ours = identity === "on-this-port" ? this.isServerOnItsPort(record) : this.looksLikeQmdServer(record.pid);
+  private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-its-port"): void {
+    const ours = identity === "on-its-port" ? this.isServerOnItsPort(record) : this.looksLikeQmdServer(record.pid);
     // Signal before clearing the record: a save that throws must not leave the server running.
     if (ours) this.terminate(record.pid, record.port);
     this.forget(record);
@@ -440,16 +458,14 @@ export class ServerManager {
   }
 
   /**
-   * The stricter identity test, for a recorded server that is signalled without ever having
-   * answered health: a usable PID, the port that is set now, a live group, and in it one process
-   * whose command line names qmd, mcp and `--port` with that port.
+   * The stricter identity test, for a recorded server that is signalled without ever having been
+   * owned by this manager: the record is usable (a PID that may be signalled, a port from 1 to
+   * 65535), its group has a live member, and one process in it has a command line that names qmd,
+   * mcp and `--port` with the record's own port. The port that is set now plays no part: it
+   * decides whether a server is kept, not whose it is.
    */
   private isServerOnItsPort(record: OwnedRecord): boolean {
-    return (
-      isUsablePid(record.pid) &&
-      record.port === this.deps.getSettings().port &&
-      this.looksLikeQmdServer(record.pid, record.port)
-    );
+    return isUsablePid(record.pid) && isUsablePort(record.port) && this.looksLikeQmdServer(record.pid, record.port);
   }
 
   /**
@@ -481,13 +497,19 @@ export class ServerManager {
       this.owned = null;
     }
     const saved = this.deps.loadRecord();
-    if (saved !== null && saved.pid === record.pid && saved.port === record.port) this.deps.saveRecord(null);
+    // `Object.is`, so that a record whose PID or port is not a number at all is still its own match.
+    if (saved !== null && Object.is(saved.pid, record.pid) && Object.is(saved.port, record.port)) this.deps.saveRecord(null);
   }
 }
 
 /** A PID that a group signal may be sent to. One to 0 or 1 would reach this process's own group, or every process. */
 function isUsablePid(pid: number): boolean {
   return Number.isInteger(pid) && pid > 1;
+}
+
+/** A port a server can listen on. */
+function isUsablePort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 /** True when the command line passes `--port` with exactly this port as the argument after it. */

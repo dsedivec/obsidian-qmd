@@ -158,6 +158,13 @@ const interruptions = {
 };
 type Interruption = keyof typeof interruptions;
 const INTERRUPTIONS = Object.keys(interruptions) as Interruption[];
+/**
+ * For a recorded server that the adoption is still asking about: a stop that comes first settles
+ * its record there and then, and `dispose` alone, or first, ends the adoption and leaves the
+ * record for the next load.
+ */
+const STOP_FIRST = INTERRUPTIONS.filter((name) => name.startsWith("stopIfOwned"));
+const DISPOSE_FIRST = INTERRUPTIONS.filter((name) => name.startsWith("dispose"));
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -818,7 +825,7 @@ describe("ServerManager overtaken while it waits for a health answer", () => {
     expect(s.events).toEqual(["spawn 4242", "SIGTERM 4242", "spawn 5151"]); expect(s.record).toEqual({ pid: 5151, port: 8181 });
     expect(first.state).toBe("rejected"); expect(first.error).toMatchObject({ kind: "server-start", message: CANCELLED });
   });
-  it.each(cases)("%s while adoption waits for health leaves the server unowned and its record alone (health then answers %j)", async (name, answer) => {
+  it.each(cases.filter(([name]) => DISPOSE_FIRST.includes(name)))("%s while adoption waits for health leaves the server unowned and its record alone (health then answers %j)", async (name, answer) => {
     const saved = { pid: 777, port: 8181 };
     const { deps, s } = fake({ deferHealth: true, record: saved, alive: [777] });
     const m = new ServerManager(deps);
@@ -833,6 +840,22 @@ describe("ServerManager overtaken while it waits for a health answer", () => {
     m.stopIfOwned();
     expect(s.killed).toEqual([]); expect(s.record).toEqual(saved);
   });
+  it.each(cases.filter(([name]) => STOP_FIRST.includes(name)))("%s while adoption waits for health leaves the server unowned, stops it as the plugin's own, and clears its record (health then answers %j)", async (name, answer) => {
+    const saved = { pid: 777, port: 8181 };
+    const { deps, s } = fake({ deferHealth: true, record: saved, alive: [777] });
+    const m = new ServerManager(deps);
+    const adopting = watch(m.adoptIfOurs());
+    interruptions[name].act(m);
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull();
+    s.deferHealth = false; s.healthy = answer;
+    s.answerHealth(answer);
+    await flush();
+    expect(adopting.state).toBe("resolved");
+    expect(vi.getTimerCount()).toBe(1); // the force-kill alone: no idle timer, so it is not owned
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]); expect(s.record).toBeNull();
+  });
 });
 
 describe("ServerManager shut down in the same tick as a call", () => {
@@ -845,12 +868,24 @@ describe("ServerManager shut down in the same tick as a call", () => {
     expect(call.state).toBe("rejected");
     expect(s.spawned).toEqual([]); expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
   });
-  it("owns nothing after adoptIfOurs, stopIfOwned, dispose", async () => {
+  it("owns nothing after adoptIfOurs, stopIfOwned, dispose, and has stopped the recorded server", async () => {
     const saved = { pid: 777, port: 8181 };
     const { deps, s } = fake({ healthy: true, record: saved, alive: [777] });
     const m = new ServerManager(deps);
     const adopting = m.adoptIfOurs();
     m.stopIfOwned(); m.dispose();
+    await adopting;
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull();
+    expect(vi.getTimerCount()).toBe(1); // the force-kill alone: no idle timer
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]); expect(s.record).toBeNull();
+  });
+  it("owns nothing and signals nothing after adoptIfOurs, dispose", async () => {
+    const saved = { pid: 777, port: 8181 };
+    const { deps, s } = fake({ healthy: true, record: saved, alive: [777] });
+    const m = new ServerManager(deps);
+    const adopting = m.adoptIfOurs();
+    m.dispose();
     await adopting;
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(60 * MIN);
@@ -1380,7 +1415,6 @@ describe("ServerManager at load, with a recorded server that does not answer", (
     ["its group is gone", (s: FakeState) => { s.alive = []; }],
     ["its PID belongs to another program", (s: FakeState) => { s.cmd = "vim notes.md"; }],
     ["its command line cannot be read", (s: FakeState) => { s.cmd = null; }],
-    ["the port setting is another", (s: FakeState) => { s.settings.port = 9000; }],
   ])("clears the record and signals nothing when %s by the end of the three seconds", async (_name, change) => {
     const { m, s } = recorded();
     const adopting = watch(m.adoptIfOurs());
@@ -1395,7 +1429,48 @@ describe("ServerManager at load, with a recorded server that does not answer", (
     m.stopIfOwned();
     expect(s.killed).toEqual([]);
   });
-  it.each(INTERRUPTIONS)("%s during the three seconds signals nothing, owns nothing, and leaves the record", async (name) => {
+  it("stops it all the same when the port setting is another by the end of the three seconds: whose server it is does not depend on that", async () => {
+    const { m, s } = recorded();
+    const adopting = watch(m.adoptIfOurs());
+    await vi.advanceTimersByTimeAsync(1000);
+    s.settings.port = 9000;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(adopting.state).toBe("resolved"); expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(STOP_FIRST)("%s during the three seconds stops it, clears the record, owns nothing, and force-kills five seconds later", async (name) => {
+    const { m, s } = recorded();
+    const adopting = watch(m.adoptIfOurs());
+    await vi.advanceTimersByTimeAsync(1000);
+    interruptions[name].act(m);
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull();
+    await flush();
+    expect(adopting.state).toBe("resolved"); expect(vi.getTimerCount()).toBe(1); // the force-kill
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(s.killed).toEqual([[777, "SIGTERM"]]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    m.stopIfOwned();
+    expect(s.killed).toHaveLength(2); expect(s.record).toBeNull();
+  });
+  it.each([
+    ["names no port", "node /x/dist/cli/qmd.js mcp --http"],
+    ["names port 81810", "node /x/dist/cli/qmd.js mcp --http --port 81810"],
+    ["has qmd and mcp on one line and the port on another", "node /x/dist/cli/qmd.js mcp --http\n/bin/sh wrapper --port 8181"],
+  ])("stopIfOwned during the three seconds clears the record and signals nothing when its command line %s", async (_name, cmd) => {
+    const { m, s } = recorded({ cmd });
+    const adopting = watch(m.adoptIfOurs());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull();
+    await flush();
+    expect(adopting.state).toBe("resolved"); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([]);
+  });
+  it.each(DISPOSE_FIRST)("%s during the three seconds signals nothing, owns nothing, and leaves the record", async (name) => {
     const { m, s } = recorded();
     const adopting = watch(m.adoptIfOurs());
     await vi.advanceTimersByTimeAsync(1000);
@@ -1746,9 +1821,9 @@ describe("ServerManager after it has waited for a stopped group", () => {
 describe("ServerManager forgetting a server", () => {
   const other = { pid: 999, port: 8181 };
 
-  // No public path reaches this: `adoptIfOurs` stands down before it would stop a recorded server
-  // while another is owned. The guard is for the next caller of `stopRecorded`, so this one test
-  // reaches past the public interface.
+  // No public path reaches this: a recorded server is stopped only by the one adoption, or by a
+  // stop that overtakes it, and both come before any start, so nothing is owned then. The guard is
+  // for the next caller of `stopRecorded`, so this one test reaches past the public interface.
   it("stopping a recorded server that is not the owned one leaves the owned server owned and its record saved", async () => {
     const { m, s } = await started();
     const stopRecorded = (m as unknown as { stopRecorded(record: OwnedRecord, identity: "qmd-server"): void }).stopRecorded.bind(m);
@@ -1877,7 +1952,7 @@ describe("ServerManager settling the saved record before any start", () => {
     await vi.advanceTimersByTimeAsync(250);
     expect(call.state).toBe("resolved");
   });
-  it.each(INTERRUPTIONS)("%s while a start waits for the adoption ends the start without a health check or a spawn", async (name) => {
+  it.each(DISPOSE_FIRST)("%s while a start waits for the adoption ends the start without a health check or a spawn", async (name) => {
     const { m, s } = recorded();
     const adopting = watch(m.adoptIfOurs());
     const call = watch(m.ensureRunning());
@@ -1891,6 +1966,21 @@ describe("ServerManager settling the saved record before any start", () => {
     await vi.advanceTimersByTimeAsync(120 * MIN);
     expect(s.healthCalls).toBe(asked); expect(s.spawned).toEqual([]); expect(s.killed).toEqual([]);
     expect(s.record).toEqual(saved);
+  });
+  it.each(STOP_FIRST)("%s while a start waits for the adoption ends the start without a health check or a spawn, and stops the recorded server", async (name) => {
+    const { m, s } = recorded();
+    const adopting = watch(m.adoptIfOurs());
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    const asked = s.healthCalls;
+    interruptions[name].act(m);
+    await flush();
+    expect(call.state).toBe("rejected");
+    expect(call.error).toMatchObject({ kind: "server-start", message: interruptions[name].message });
+    expect(adopting.state).toBe("resolved"); expect(vi.getTimerCount()).toBe(1); // the force-kill of the recorded server
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.healthCalls).toBe(asked); expect(s.spawned).toEqual([]);
+    expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]); expect(s.record).toBeNull();
   });
   it("shares the wait for the adoption between callers, and says it is starting to none of them until it is", async () => {
     const { m, s } = recorded({ diesOn: "SIGTERM" });
@@ -2049,20 +2139,84 @@ describe("ServerManager settling the saved record before any start", () => {
     watch(m.ensureRunning());
     expect(s.healthCalls).toBe(asked + 1); expect(loadRecord).toHaveBeenCalledTimes(2); // the second read is the stop's own
   });
-  it("does not make the adoption again after a stop overtook it: the record is left, and a later start goes straight to its health check", async () => {
-    const { m, s } = recorded();
-    const first = watch(m.ensureRunning());
+  it.each([
+    ["the plugin's call at load", (m: ServerManager) => { void m.adoptIfOurs(); }],
+    ["a start", (m: ServerManager) => { watch(m.ensureRunning()); }],
+  ])("when a stop overtakes the adoption begun by %s, stops the recorded server and clears its record; a later start waits for that group, then spawns once", async (_name, begin) => {
+    const { m, s } = recorded({ diesOn: "SIGKILL" });
+    begin(m);
     await vi.advanceTimersByTimeAsync(1000);
-    m.stopIfOwned(); // a settings change, say: it ends the adoption and the start that waited for it
-    await flush();
-    expect(first.state).toBe("rejected"); expect(first.error).toMatchObject({ kind: "server-start", message: CANCELLED });
-    expect(s.record).toEqual(saved); expect(s.killed).toEqual([]); expect(vi.getTimerCount()).toBe(0);
+    m.stopIfOwned(); // as a change of the QMD path or of the extra PATH directories does
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(1000);
     const asked = s.healthCalls;
-    const second = watch(m.ensureRunning());
-    expect(s.healthCalls).toBe(asked + 1); // in the same tick: there is no adoption to wait for any more
-    await flush();
-    expect(s.events).toEqual(["spawn 5151"]); expect(s.record).toEqual(saved);
+    const call = watch(m.ensureRunning());
+    expect(s.healthCalls).toBe(asked + 1); // in the same tick: the record is settled, so there is no adoption to wait for
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(s.events).toEqual(["SIGTERM 777"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual(["SIGTERM 777", "SIGKILL 777", "spawn 5151"]);
     await vi.advanceTimersByTimeAsync(250);
-    expect(second.state).toBe("resolved"); expect(s.killed).toEqual([]);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.spawned).toHaveLength(1); expect(s.killed).toHaveLength(2); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("when a stop overtakes the adoption of a PID that is not this port's server, clears the record and signals nothing; a later start spawns at once", async () => {
+    const { m, s } = recorded({ cmd: "node /x/dist/cli/qmd.js mcp --http" });
+    const adopting = watch(m.adoptIfOurs());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull();
+    await flush();
+    expect(adopting.state).toBe("resolved"); expect(vi.getTimerCount()).toBe(0);
+    const call = watch(m.ensureRunning());
+    await flush();
+    expect(s.events).toEqual(["spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.killed).toEqual([]);
+  });
+  it("stops at once a recorded server on a port the plugin no longer uses, without asking it for health, and a start on the port that is set does not wait for it", async () => {
+    const { m, s } = recorded({ record: { pid: 777, port: 9000 }, cmd: "node /x/dist/cli/qmd.js mcp --http --port 9000" });
+    const adopting = watch(m.adoptIfOurs());
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull(); expect(s.healthCalls).toBe(0);
+    await flush();
+    expect(adopting.state).toBe("resolved"); expect(vi.getTimerCount()).toBe(1); // the force-kill alone: it is not owned
+    const call = watch(m.ensureRunning());
+    await flush();
+    expect(s.events).toEqual(["SIGTERM 777", "spawn 5151"]); expect(s.spawned).toEqual([8181]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(4750);
+    expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]);
+  });
+  it("remembers that server against its own port: a start on that port waits for it", async () => {
+    const { m, s } = recorded({ record: { pid: 777, port: 9000 }, cmd: "node /x/dist/cli/qmd.js mcp --http --port 9000", diesOn: "SIGKILL" });
+    void m.adoptIfOurs();
+    s.settings.port = 9000; // set back to the port that server holds
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(s.events).toEqual(["SIGTERM 777"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual(["SIGTERM 777", "SIGKILL 777", "spawn 5151"]); expect(s.spawned).toEqual([9000]);
+  });
+  it("clears the record of a server on another port, and signals nothing, when its command line names a port other than the record's", async () => {
+    // The record says 9000 and the process says 8181, the port that is set: it is neither the
+    // recorded server nor one to adopt. If it answers, it is another's.
+    const { m, s } = recorded({ healthy: true, record: { pid: 777, port: 9000 } });
+    await m.adoptIfOurs();
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull(); expect(s.healthCalls).toBe(0);
+    await m.ensureRunning();
+    m.noteActivity();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]); expect(s.spawned).toEqual([]);
+  });
+  it.each([0, -1, 65536, 80.5, NaN])("clears a record whose port is %s and signals nothing, even when a qmd server names that very port", async (port) => {
+    const { m, s } = recorded({ record: { pid: 777, port }, cmd: `node /x/dist/cli/qmd.js mcp --http --port ${port}` });
+    await m.adoptIfOurs();
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
   });
 });
