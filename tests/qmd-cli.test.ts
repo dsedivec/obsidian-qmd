@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdtempSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -30,10 +30,15 @@ describe("QmdCli", () => {
     expect(stdout.startsWith(`${dirname(FAKE)}:/extra/one:/extra/two:`)).toBe(true);
   });
   it("runs a qmd whose path contains a space", async () => {
-    const copy = join(mkdtempSync(join(tmpdir(), "has space ")), "qmd");
-    copyFileSync(FAKE, copy);
-    chmodSync(copy, 0o755);
-    expect((await cli(copy).run(["echo", "x"], T)).stdout).toBe("out:x\n");
+    const dir = mkdtempSync(join(tmpdir(), "has space "));
+    try {
+      const copy = join(dir, "qmd");
+      copyFileSync(FAKE, copy);
+      chmodSync(copy, 0o755);
+      expect((await cli(copy).run(["echo", "x"], T)).stdout).toBe("out:x\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   it("kills the whole process group on timeout", async () => {
     const result = await cli().run(["hang"], { timeoutMs: 300 });
