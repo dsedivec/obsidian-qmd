@@ -106,6 +106,7 @@ theme variables. The approved mockup is in `docs/superpowers/specs/`.
   port. Always act on the server's process group, not just its launcher.
 - Never run `qmd pull`, or refresh models in any other way, automatically.
 - Never start a process through a shell, or build a command as a string.
+- Always run `qmd` from `/`, never from an inherited working directory.
 - Talk to QMD only with Node's `http` on `localhost`: not `fetch`, and not
   `127.0.0.1`.
 - Text from notes or from QMD goes into the DOM as text, never as HTML.
@@ -120,10 +121,13 @@ unit, test-first.
 ### Testing
 
 Unit tests run in Vitest. Integration tests run the real `qmd`, always isolated
-with `INDEX_PATH` and `QMD_CONFIG_DIR`, so that the default index is never
-touched. In-app checks are made in a scratch vault through the Obsidian CLI.
-Dale's Main vault is not a test bed: its notes are read-only, and nothing is
-installed there without asking.
+so that the default index is never touched: `INDEX_PATH` and `QMD_CONFIG_DIR`
+point into a temp directory, and `qmd` never runs with a working directory at or
+below a `.qmd/index.yml`. The plugin always runs `qmd` from `/`; a test that
+starts `qmd` some other way must set a working directory inside its temp
+directory. In-app checks are made in a scratch vault through the Obsidian CLI.
+Dale's Main vault may be indexed and searched for testing. Its notes are
+read-only, and nothing is installed there without asking.
 
 ### Where the reasoning lives
 

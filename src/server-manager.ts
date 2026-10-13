@@ -65,8 +65,11 @@ interface StoppedGroup {
 /**
  * Makes sure a QMD server is reachable and stops only its own. It is there for two things: that
  * the plugin never leaves behind a server it started, and that it never signals a process it did
- * not start or adopt. The one case in which a server it started can still be left behind is set
- * out as a known limit in the design document, under "ServerManager".
+ * not start, adopt, or identify as its own from a saved record. A server it started can still be
+ * left behind when it does not act on SIGTERM and the window closes before the SIGKILL that
+ * follows five seconds later, whichever stop sent the SIGTERM: that timer dies with the page, and
+ * the record is already cleared. The design document sets this out as a known limit, under
+ * "ServerManager".
  *
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
  * `pending`, then in `owned`), or with one from a saved record: either `adoptIfOurs` kept that

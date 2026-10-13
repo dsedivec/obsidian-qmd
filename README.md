@@ -8,9 +8,9 @@ CLI.
 
 ## Requirements
 
-- [QMD][qmd] 2.8 or later.
-- `node`, which QMD runs on, in a folder that the plugin's "Extra PATH
-  directories" setting names.
+- [QMD][qmd]. The plugin is built and tested against QMD 2.8.3.
+- `node`, which QMD runs on, in one of the plugin's "Extra PATH directories", in
+  the folder of the "QMD path", or in a folder already on Obsidian's `PATH`.
 - Obsidian 1.12.2 or later, on the desktop.
 - macOS or Linux. The plugin is developed and tested on macOS. Windows and
   mobile are not supported.
@@ -41,9 +41,10 @@ Then, in Obsidian, turn on "QMD Search" under Settings → Community plugins.
 After a later `make install-plugin`, turn the plugin off and on again to load
 the new build.
 
-Set the "QMD path" setting before your first search. Obsidian does not inherit
-your shell's `PATH` when it is started from the Dock, so the default, `qmd`, is
-usually not found, and the pane then says
+Check the "QMD path" setting before your first search. The default, `qmd`, is
+found only if `qmd` is in one of the "Extra PATH directories" or in a folder
+already on Obsidian's `PATH`, and Obsidian does not inherit your shell's `PATH`
+when it is started from the Dock. When `qmd` is not found, the pane says
 `Index failed: Couldn't run qmd at "qmd".` Enter the full path that `which qmd`
 prints in a terminal. The plugin runs `qmd` with a `PATH` made of that path's
 folder, then the "Extra PATH directories", then Obsidian's own `PATH`. If `node`
@@ -62,7 +63,11 @@ is in none of those, add its folder to "Extra PATH directories".
 | Result count                   | `10`                               | How many results a search shows. 1 to 50.                                                                   |
 
 A field is saved when you press Enter in it or leave it, and a change takes
-effect at the next search or index run.
+effect at the next search or index run. A value that cannot be used is not
+saved, and the field goes back to the previous value: a number field that is
+empty or holds text, a port outside 1 to 65535, an empty QMD path, or a
+collection name that breaks the rule. A number that is merely out of its range
+becomes the nearest value allowed. "Extra PATH directories" may be left empty.
 
 - The collection name is made from the vault's name the first time the plugin
   loads, and renaming the vault later does not change it. A name that breaks the
@@ -89,7 +94,9 @@ setting covers are left out of the results.
 ## Obsidian CLI
 
 The plugin adds a `qmd-search` subcommand to the Obsidian CLI. It runs the same
-search as the pane, with the same settings, exclusions and server:
+search as the pane, with the same settings, exclusions and server. The Obsidian
+app must be running with the vault open, and Obsidian's command-line interface
+must be enabled.
 
 ```sh
 obsidian vault="Notes" qmd-search query="pod identity" limit=1
@@ -114,7 +121,15 @@ exits with status 0 either way.
 
 Run the command with a timeout. The Obsidian CLI has no time limit of its own,
 and a `qmd-search` call that is in flight when its vault's window closes never
-returns. Scripts and agents should wrap it, for example in `timeout -k`.
+returns. Scripts and agents should wrap it:
+
+```sh
+timeout -k 5 200 obsidian vault="Notes" qmd-search query="…"
+```
+
+That stops the CLI after 200 seconds, and kills it 5 seconds later if it is
+still running. Stock macOS has no `timeout`. It comes with GNU coreutils, as
+`gtimeout` unless the unprefixed tools are installed.
 
 ## The QMD server
 
@@ -123,7 +138,9 @@ search to the next.
 
 - **Starting.** If no QMD server answers on the "Server port" when you search,
   the plugin starts one with `qmd mcp --http --port <port>`. The pane says
-  "Starting QMD server…" while it waits.
+  "Starting QMD server…" while it waits. The plugin runs `qmd` from `/`, and not
+  from the folder Obsidian was started in, so that it always uses QMD's global
+  index and never the index of a project around that folder.
 - **Sharing.** A QMD server that already answers on that port is used as it is,
   and the plugin never stops it. That includes one you started yourself with
   `qmd mcp --http`, whose default port, 8181, is the plugin's too. Two vaults
@@ -136,10 +153,16 @@ search to the next.
   leaves the server running, the plugin finds it at the next start, and either
   goes on using it or stops it.
 
-One case is known in which a server the plugin started is left running: the
-server has stopped responding at the moment the window closes or Obsidian quits.
-`pgrep -fl "mcp --http --port 8181"` lists such a server, and it has to be
-killed by hand.
+One case is known in which a server the plugin started is left running. The
+plugin stops a server by asking it to stop, and kills it five seconds later if
+it is still there. A server that does not act on the request, because it has
+stopped responding, is left running if the vault's window closes or Obsidian
+quits before those five seconds are up. That is so whether the window closing
+was itself the reason for the request, or the plugin had made it less than five
+seconds earlier for any other reason: the idle timeout, a settings change,
+replacing a server that had stopped answering, or stopping one that an earlier
+session left behind. `pgrep -fl "mcp --http --port 8181"` lists such a server,
+and it has to be killed by hand.
 
 ## Models
 
@@ -160,9 +183,10 @@ deleted model is not restored. That is why the plugin leaves `qmd pull` to you.
 
 A server that the plugin starts writes its output to
 `$TMPDIR/qmd-search-server-<port>.log`, which is `qmd-search-server-8181.log`
-with the default port. The log contains the text of your queries. The plugin
-creates it readable by your user only, and replaces it each time it starts a
-server. When a server fails to start, the pane shows the last lines of this log.
+with the default port. On Linux `$TMPDIR` is often unset, and the log is then
+under `/tmp`. The log contains the text of your queries. The plugin creates it
+readable by your user only, and replaces it each time it starts a server. When a
+server fails to start, the pane shows the last lines of this log.
 
 ## The index and its collection
 
