@@ -23,8 +23,12 @@ export interface KeyValueStore {
   set(key: string, value: unknown): void;
 }
 
+/**
+ * QMD's own rule, less a leading hyphen: the name reaches `qmd` as a positional argument, where
+ * a leading hyphen could be read as an option.
+ */
 export function isValidCollectionName(name: string): boolean {
-  return /^[A-Za-z0-9_-]+$/.test(name);
+  return /^[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(name);
 }
 
 export function deriveCollectionName(vaultName: string): string {
@@ -32,7 +36,12 @@ export function deriveCollectionName(vaultName: string): string {
   return name === "" ? "vault" : name;
 }
 
+/**
+ * A number, or a string that holds one. Nothing else counts, so that `Number()` cannot turn a
+ * cleared field ("" is 0), a null or a boolean into a setting.
+ */
 function readNumber(value: unknown): number | undefined {
+  if (typeof value !== "number" && (typeof value !== "string" || value.trim() === "")) return undefined;
   const n = Number(value);
   return Number.isFinite(n) ? Math.round(n) : undefined;
 }
