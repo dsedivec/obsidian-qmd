@@ -72,9 +72,13 @@ interface StoppedGroup {
  * the plugin's own beyond doubt, by a command line that names QMD's server on the record's own
  * port (never held, only stopped). A server that merely answers health is none of these, and is
  * never signalled. A PID that was not spawned moments ago is checked again right before SIGTERM,
- * in `stopRecorded` and nowhere else. An owned PID is forgotten once its launcher has exited and
- * its process group is gone, so a PID that died and was reused is not signalled either. Every
- * PID here names a process group: the launcher leads it and the server is in it.
+ * in `stopRecorded` and nowhere else, with one exception: an owned server that this manager
+ * spawned and whose launcher's `exit` has not resolved is signalled by `stopOwned` with no check,
+ * on a usable PID alone. A PID cannot be reused while the process that holds it has not exited,
+ * and the check, which reads command lines with `ps`, could otherwise fail and leave a live
+ * server forgotten. An owned PID is forgotten once its launcher has exited and its process group
+ * is gone, so a PID that died and was reused is not signalled either. Every PID here names a
+ * process group: the launcher leads it and the server is in it.
  *
  * It never spawns on a port while a group it has itself sent SIGTERM for that port is still
  * alive: such a group holds the port, and the new server could not bind it. Every SIGTERM is
@@ -104,6 +108,14 @@ interface StoppedGroup {
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
   private owned: OwnedRecord | null = null;
+  /**
+   * The record of a server this manager spawned, from when it comes to be owned until its
+   * launcher's `exit` resolves. A PID is not reused while the process that holds it has not
+   * exited, so for that long the PID is beyond doubt still this server's, and `stopOwned` signals
+   * it with no identity check. It counts only while it is the owned record. Never set for an
+   * adopted server. In memory only: the saved record says nothing of it.
+   */
+  private launcherHeld: OwnedRecord | null = null;
   /** The server this manager spawned that has not answered health yet and has not exited. */
   private pending: {
     pid: number | undefined;
@@ -339,6 +351,13 @@ export class ServerManager {
     if (outcome === "healthy") {
       if (server.pid === undefined) return;
       const record = { pid: server.pid, port };
+      // Spawned here, and its launcher has not exited: until it does, the PID cannot be reused.
+      // Set before `own`, whose save may throw, together with the handler that ends it. The
+      // launcher's exit ends it whatever has happened by then, `dispose` included.
+      this.launcherHeld = record;
+      void server.exit.then(() => {
+        if (this.launcherHeld === record) this.launcherHeld = null;
+      });
       this.own(record);
       // The launcher can exit while the server it spawned lives on in the group. The PID can be
       // reused only once the whole group is gone, so only then is the server forgotten.
@@ -483,15 +502,29 @@ export class ServerManager {
     );
   }
 
-  /** Stops the owned server if its PID still looks like a QMD server, and forgets it either way. */
+  /**
+   * Stops the owned server and forgets it. A server whose launcher this manager still holds needs
+   * only a usable PID: that PID cannot have been reused, and the identity check reads command
+   * lines with `ps`, which can fail or be slow, and would then leave a live server forgotten and
+   * never signalled. Any other owned server is signalled only if its PID still looks like a QMD
+   * server. It is forgotten either way.
+   */
   private stopOwned(): void {
-    if (this.owned) this.stopRecorded(this.owned, "qmd-server");
+    const record = this.owned;
+    if (!record) return;
+    if (this.launcherHeld !== record) {
+      this.stopRecorded(record, "qmd-server");
+      return;
+    }
+    // Signal before clearing the record, as in `stopRecorded`.
+    if (isUsablePid(record.pid)) this.terminate(record.pid, record.port);
+    this.forget(record);
   }
 
   /**
-   * The one way to SIGTERM for a PID that was not spawned moments ago: the owned server's, or
-   * that of a recorded server which the adoption does not keep. It is signalled only if it
-   * passes the identity test now, and it is forgotten either way.
+   * The one way to SIGTERM for a PID that could have been reused: that of an owned server whose
+   * launcher this manager does not hold, or of a recorded server which the adoption does not
+   * keep. It is signalled only if it passes the identity test now, and it is forgotten either way.
    */
   private stopRecorded(
     record: OwnedRecord,
@@ -509,8 +542,9 @@ export class ServerManager {
   /**
    * The identity test for a process group the manager did not just spawn: it still has a live
    * member, and one of its processes has a command line naming both qmd and mcp. Adoption
-   * requires it, and so does every SIGTERM to an owned server, in case the group died and its PID
-   * was reused. With `port`, that same command line must also pass `--port` with that port.
+   * requires it, and so does every SIGTERM to an owned server whose launcher this manager does
+   * not hold, in case the group died and its PID was reused. With `port`, that same command line
+   * must also pass `--port` with that port.
    */
   private looksLikeQmdServer(pid: number, port?: number): boolean {
     if (!this.deps.isAlive(pid)) return false;
@@ -556,8 +590,9 @@ export class ServerManager {
 
   private own(record: OwnedRecord): void {
     this.owned = record;
-    this.deps.saveRecord(record);
+    // Armed before the save: one that throws must not leave an owned server with no idle timer.
     this.noteActivity();
+    this.deps.saveRecord(record);
   }
 
   /**

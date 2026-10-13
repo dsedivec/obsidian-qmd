@@ -635,9 +635,13 @@ describe("ServerManager signals only what it owns", () => {
       },
     ],
   ])(
-    "replaces an owned server that no longer answers without signalling a PID that %s",
+    "replaces an owned server that no longer answers without signalling a PID that %s, once its launcher has exited",
     async (_name, change) => {
-      const { m, s } = await started();
+      // The launcher goes first and leaves the group running: while the launcher this manager
+      // spawned has not exited, the PID is its own whatever is found there.
+      const { m, s } = await started({ groupSurvivesExit: true });
+      s.exit({ code: null });
+      await flush();
       change(s);
       s.healthy = false;
       s.healthyAfterPolls = 1;
@@ -694,7 +698,15 @@ describe("ServerManager signals only what it owns", () => {
 
 describe("ServerManager checks a PID is still its server before SIGTERM", () => {
   const owning = {
-    spawned: () => started(),
+    // Spawned by this manager, with the launcher exited since and its group still running. From
+    // then on the PID can be reused, so it is checked as an adopted server's is. Until then it is
+    // not checked: see "ServerManager stopping a server while it still holds its launcher".
+    "spawned and its launcher then left": async () => {
+      const { m, s } = await started({ groupSurvivesExit: true });
+      s.exit({ code: null });
+      await flush();
+      return { m, s };
+    },
     adopted: async () => {
       const { deps, s } = fake({
         healthy: true,
@@ -730,14 +742,14 @@ describe("ServerManager checks a PID is still its server before SIGTERM", () => 
     ]
   > = [];
   for (const trigger of ["the idle timer", "stopIfOwned"] as const)
-    for (const source of ["spawned", "adopted"] as const)
+    for (const source of Object.keys(owning) as Array<keyof typeof owning>)
       for (const problem of Object.keys(problems) as Array<
         keyof typeof problems
       >)
         cases.push([trigger, source, problem]);
 
   it.each(cases)(
-    "on %s, signals nothing and clears the record when the %s PID %s",
+    "on %s, signals nothing and clears the record when the PID of a server it %s %s",
     async (trigger, source, problem) => {
       const { m, s } = await owning[source]();
       problems[problem](s);
@@ -768,6 +780,163 @@ describe("ServerManager checks a PID is still its server before SIGTERM", () => 
     m.stopIfOwned();
     await failed;
     expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+});
+
+// A PID cannot be reused while the process that holds it has not exited. A server this manager
+// spawned is therefore its own for as long as its launcher's `exit` has not resolved, whatever
+// `ps` says of it or fails to say. From then on, and always for an adopted server, the identity
+// check decides, as before.
+describe("ServerManager stopping a server while it still holds its launcher", () => {
+  /** Makes the next start find no server answering, and spawn pid 5151, which answers at its first poll. */
+  function nextStart(s: FakeState): void {
+    s.healthy = false;
+    s.healthyAfterPolls = 1;
+    s.spawnPid = 5151;
+  }
+
+  /** Each of the three ways an owned server is stopped. It returns once the stop has been made. */
+  const stops = {
+    "the idle timer": async () => {
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+    },
+    stopIfOwned: async (m: ServerManager) => {
+      m.stopIfOwned();
+    },
+    "a start that finds it no longer answers": async (
+      m: ServerManager,
+      s: FakeState,
+    ) => {
+      nextStart(s);
+      watch(m.ensureRunning());
+      await flush();
+    },
+  };
+  type Stop = keyof typeof stops;
+  const STOPS = Object.keys(stops) as Stop[];
+
+  /** What would fail the identity check. */
+  const doubts = {
+    "its command line cannot be read": (s: FakeState) => {
+      s.cmd = null;
+    },
+    "its command line names neither qmd nor mcp": (s: FakeState) => {
+      s.cmd = "/bin/sh /x/wrapper --port 8181";
+    },
+    "its group is reported to have no live member": (s: FakeState) => {
+      s.alive = [];
+    },
+  };
+  type Doubt = keyof typeof doubts;
+  const held: Array<[Stop, Doubt]> = [];
+  for (const stop of STOPS)
+    for (const doubt of Object.keys(doubts) as Doubt[])
+      held.push([stop, doubt]);
+
+  it.each(held)(
+    "on %s, sends SIGTERM to a server it spawned whose launcher has not exited, though %s",
+    async (stop, doubt) => {
+      const { m, s } = await started();
+      doubts[doubt](s);
+      await stops[stop](m, s);
+      expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+      expect(s.record).toBeNull();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(s.killed).toEqual([
+        [4242, "SIGTERM"],
+        [4242, "SIGKILL"],
+      ]);
+    },
+  );
+
+  /** The servers that are still checked: the PID of each could have been reused. */
+  const checked = {
+    "it adopted": async () => {
+      const { deps, s } = fake({
+        healthy: true,
+        record: { pid: 777, port: 8181 },
+        alive: [777],
+      });
+      const m = new ServerManager(deps);
+      await m.adoptIfOurs();
+      return { m, s };
+    },
+    "it spawned, whose launcher has exited and left its group running":
+      async () => {
+        const { m, s } = await started({ groupSurvivesExit: true });
+        s.exit({ code: null });
+        await flush();
+        return { m, s };
+      },
+  };
+  type Checked = keyof typeof checked;
+  const unchanged: Array<[Stop, Checked]> = [];
+  for (const stop of STOPS)
+    for (const source of Object.keys(checked) as Checked[])
+      unchanged.push([stop, source]);
+
+  it.each(unchanged)(
+    "on %s, still signals nothing and clears the record of a server %s, when its command line cannot be read",
+    async (stop, source) => {
+      const { m, s } = await checked[source]();
+      expect(s.record).not.toBeNull();
+      s.cmd = null;
+      await stops[stop](m, s);
+      expect(s.killed).toEqual([]);
+      expect(s.record).toBeNull();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(s.killed).toEqual([]);
+    },
+  );
+
+  it("checks the PID again once the launcher has exited, even when that was after dispose", async () => {
+    const { m, s } = await started({ groupSurvivesExit: true });
+    m.dispose();
+    s.exit({ code: null });
+    await flush();
+    s.cmd = null;
+    m.stopIfOwned();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([]);
+    expect(s.record).toBeNull();
+  });
+
+  it("goes by the launcher of the server it owns now: one it replaced exiting later changes nothing", async () => {
+    const { m, s } = await started({ diesOn: "SIGTERM" });
+    nextStart(s);
+    const again = m.ensureRunning();
+    await vi.advanceTimersByTimeAsync(250);
+    await again;
+    expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    s.exit({ code: null }, 0); // the launcher of the server that was replaced
+    await flush();
+    s.cmd = null;
+    m.stopIfOwned();
+    expect(s.events).toEqual([
+      "spawn 4242",
+      "SIGTERM 4242",
+      "spawn 5151",
+      "SIGTERM 5151",
+    ]);
+    expect(s.record).toBeNull();
+  });
+
+  it("checks the PID of the server it owns now when that one's launcher has exited, though an earlier launcher never did", async () => {
+    const { m, s } = await started({
+      diesOn: "SIGTERM",
+      groupSurvivesExit: true,
+    });
+    nextStart(s);
+    const again = m.ensureRunning();
+    await vi.advanceTimersByTimeAsync(250);
+    await again;
+    s.exit({ code: null }, 1); // the launcher of the server that is owned now
+    await flush();
+    expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    s.cmd = null;
+    m.stopIfOwned();
+    expect(s.events).toEqual(["spawn 4242", "SIGTERM 4242", "spawn 5151"]);
+    expect(s.record).toBeNull();
   });
 });
 
@@ -1387,6 +1556,46 @@ describe("ServerManager with a failing store or a bad record", () => {
       [4242, "SIGKILL"],
     ]);
   });
+  it.each([
+    [
+      "spawned",
+      4242,
+      async (deps: ServerDeps) => {
+        const call = watch(new ServerManager(deps).ensureRunning());
+        await vi.advanceTimersByTimeAsync(250);
+        return call;
+      },
+    ],
+    [
+      "adopted",
+      777,
+      async (deps: ServerDeps) => {
+        const call = watch(new ServerManager(deps).adoptIfOurs());
+        await flush();
+        return call;
+      },
+    ],
+  ])(
+    "still stops a server it has %s at the idle timeout when saving its record threw",
+    async (_name, pid, own) => {
+      const { deps, s } = fake({
+        healthy: pid === 777,
+        healthyAfterPolls: 1,
+        record: pid === 777 ? { pid: 777, port: 8181 } : null,
+        alive: pid === 777 ? [777] : [],
+        saveThrows: true,
+      });
+      const call = await own(deps);
+      // The failure to save still reaches the caller.
+      expect(call.state).toBe("rejected");
+      expect(call.error).toMatchObject({ message: "storage unavailable" });
+      s.saveThrows = false;
+      await vi.advanceTimersByTimeAsync(60 * MIN - 1);
+      expect(s.killed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(s.killed).toEqual([[pid, "SIGTERM"]]);
+    },
+  );
   it.each([0, 1, -5, 1.5, NaN])(
     "clears a record whose pid is %s without looking the process up or signalling",
     async (pid) => {
@@ -1762,9 +1971,13 @@ describe("ServerManager replacing its own server that stopped answering", () => 
       },
     ],
   ])(
-    "spawns at once, with no wait and no signal, when the PID it owned %s",
+    "spawns at once, with no wait and no signal, when the PID it owned %s, once its launcher has exited",
     async (_name, change) => {
-      const { m, s } = await unresponsive();
+      // With the launcher gone the PID is checked before it is signalled. While this manager still
+      // holds the launcher it is not: see "ServerManager stopping a server while it still holds its launcher".
+      const { m, s } = await unresponsive({ groupSurvivesExit: true });
+      s.exit({ code: null });
+      await flush();
       change(s);
       const call = watch(m.ensureRunning());
       await flush();
@@ -3069,6 +3282,31 @@ describe("ServerManager settling the saved record before any start", () => {
     expect(s.record).toEqual({ pid: 5151, port: 8181 });
     await vi.advanceTimersByTimeAsync(10_000);
     expect(s.killed).toEqual([]);
+  });
+  it("when a stop overtakes the adoption after the port setting has changed, stops the recorded server all the same and clears its record: whose it is goes by the record's own port; a later start spawns at once on the new port", async () => {
+    const { m, s } = recorded();
+    const adopting = watch(m.adoptIfOurs());
+    await vi.advanceTimersByTimeAsync(1000);
+    s.settings.port = 9000; // as a change of the port setting does, before it calls stopIfOwned
+    m.stopIfOwned();
+    expect(s.killed).toEqual([[777, "SIGTERM"]]);
+    expect(s.record).toBeNull();
+    await flush();
+    expect(adopting.state).toBe("resolved");
+    expect(vi.getTimerCount()).toBe(1); // the force-kill alone: it is not owned
+    const call = watch(m.ensureRunning());
+    await flush();
+    // The stopped group held port 8181, so a start on 9000 does not wait for it.
+    expect(s.events).toEqual(["SIGTERM 777", "spawn 5151"]);
+    expect(s.spawned).toEqual([9000]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved");
+    expect(s.record).toEqual({ pid: 5151, port: 9000 });
+    await vi.advanceTimersByTimeAsync(4750);
+    expect(s.killed).toEqual([
+      [777, "SIGTERM"],
+      [777, "SIGKILL"],
+    ]);
   });
   it("stops at once a recorded server on a port the plugin no longer uses, without asking it for health, and a start on the port that is set does not wait for it", async () => {
     const { m, s } = recorded({
