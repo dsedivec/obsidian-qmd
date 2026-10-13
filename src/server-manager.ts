@@ -230,13 +230,16 @@ export class ServerManager {
 
   /**
    * The identity test for a process group the manager did not just spawn: it still has a live
-   * member, and its command lines name both qmd and mcp. Adoption requires it, and so does every
-   * SIGTERM to an owned server, in case the group died and its PID was reused.
+   * member, and one of its processes has a command line naming both qmd and mcp. Adoption
+   * requires it, and so does every SIGTERM to an owned server, in case the group died and its PID
+   * was reused.
    */
   private looksLikeQmdServer(pid: number): boolean {
     if (!this.deps.isAlive(pid)) return false;
-    const commandLine = this.deps.commandLine(pid);
-    return commandLine !== null && commandLine.includes("qmd") && commandLine.includes("mcp");
+    const commandLines = this.deps.commandLine(pid);
+    if (commandLines === null) return false;
+    // Line by line: `qmd` in one process and `mcp` in another does not make either the server.
+    return commandLines.split("\n").some((line) => line.includes("qmd") && line.includes("mcp"));
   }
 
   /** SIGTERM now, SIGKILL five seconds later unless `dispose` clears it first or already ran. */

@@ -457,6 +457,7 @@ describe("ServerManager checks a PID is still its server before SIGTERM", () => 
     "is not alive": (s: FakeState) => { s.alive = []; },
     "has the command line of another program": (s: FakeState) => { s.cmd = "vim notes.md"; },
     "has an unreadable command line": (s: FakeState) => { s.cmd = null; },
+    "has qmd and mcp only in different processes of its group": (s: FakeState) => { s.cmd = "vim qmd-notes.md\nnode mcp-inspector"; },
   };
   const cases: Array<["the idle timer" | "stopIfOwned", keyof typeof owning, keyof typeof problems]> = [];
   for (const trigger of ["the idle timer", "stopIfOwned"] as const)
@@ -640,6 +641,7 @@ describe("ServerManager adopting", () => {
     ["an unreadable command line", { cmd: null }],
     ["a qmd command that is not the server", { cmd: "qmd query notes" }],
     ["an mcp server that is not qmd", { cmd: "node /x/mcp-server --http" }],
+    ["qmd and mcp only in different processes of the group", { cmd: "vim qmd-notes.md\nnode mcp-inspector" }],
     ["no health answer", { healthy: false }],
   ])("refuses adoption with %s at once: no record and no idle timer", async (_name, over) => {
     const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777], cmd: QMD_CMD, ...over });
@@ -648,6 +650,18 @@ describe("ServerManager adopting", () => {
     expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
     m.stopIfOwned();
     expect(s.killed).toEqual([]);
+  });
+  it.each([
+    ["the idle timer", async () => { await vi.advanceTimersByTimeAsync(60 * MIN); }],
+    ["stopIfOwned", async (m: ServerManager) => { m.stopIfOwned(); }],
+  ])("adopts a group in which one process names both qmd and mcp, and %s stops it", async (_name, stop) => {
+    const cmd = "/bin/sh wrapper\nnode /x/dist/cli/qmd.js mcp --http --port 8181";
+    const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777], cmd });
+    const m = new ServerManager(deps);
+    await m.adoptIfOurs();
+    expect(s.record).toEqual({ pid: 777, port: 8181 }); expect(vi.getTimerCount()).toBe(1);
+    await stop(m);
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull();
   });
   it("force-kills an adopted server five seconds after stopping it", async () => {
     const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777], cmd: QMD_CMD });
