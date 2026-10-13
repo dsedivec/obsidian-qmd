@@ -110,19 +110,22 @@ becomes the nearest value allowed. "Extra PATH directories" may be left empty.
 
 The settings tab also has two things that are not settings:
 
-- **Test**, beside the QMD path, saves what is in the field and runs
-  `qmd --version` with the settings as they are. It reads no index and starts no
-  server. Under the field it then says one of these: `Found QMD` and the
-  version; that the file could not be run; that `qmd` started but failed, with
-  the first line it printed, and a hint when `node` was not found; that the
-  program ran but does not look like QMD; or that it did not answer within 15
-  seconds.
+- **Test**, beside the QMD path, saves what is in the field, as leaving the
+  field does, and then runs `qmd --version` just as the plugin runs `qmd`. That
+  command reads no index and starts no server. Under the field it then says one
+  of these: `Found QMD` and the version; that the file could not be run; that
+  `qmd` started but failed, with the line that says why, and a hint when `node`
+  was not found; that the program ran but does not look like QMD; or that it did
+  not answer within 15 seconds. The line goes away when either path setting
+  changes, since it was about the command as it was.
 - **QMD server**, under the server port, says how the server stands. It is read
   again every three seconds while the tab is open. It says that the server is
-  not running, that it is starting, that it is running and this plugin started
-  it (with its process ID), that this plugin started it but it is not answering,
+  not running, that it is starting, that it is stopping, that it is running and
+  this plugin started it, that this plugin started it but it is not answering,
   or that it is running and something else started it. The last is also what a
   second vault shows while it shares the server that the first vault started.
+  The process ID shown for the plugin's own server is that of `qmd`'s launcher.
+  The server itself is the launcher's child, in the same process group.
 
 ## Commands
 
@@ -274,20 +277,25 @@ BRAT installs the plugin from a GitHub release of
 version, with no `v` in front, and has `main.js`, `manifest.json` and
 `styles.css` attached.
 
-1. Set the new version in `manifest.json` and `package.json`, and commit.
-2. Push the default branch. The release is made from its head.
-3. Build the plugin and create the release with the [GitHub CLI][gh]:
+1. Set the new version in `manifest.json` and `package.json`, run `npm install`
+   so that `package-lock.json` follows, and commit.
+2. Push the default branch.
+3. In a checkout of the default branch that is level with GitHub, build the
+   plugin and create the release with the [GitHub CLI][gh]:
 
 ```sh
-make build
-version=$(node -p 'require("./manifest.json").version')
-gh release create "$version" main.js manifest.json styles.css \
-  --title "$version" --generate-notes
+test -z "$(git status --porcelain)" &&
+  version=$(node -p 'require("./manifest.json").version') &&
+  make build &&
+  gh release create "$version" main.js manifest.json styles.css \
+    --title "$version" --generate-notes --target "$(git rev-parse HEAD)"
 ```
 
-`gh release create` makes the tag on GitHub if it is not there yet. Keep the tag
-and the `version` in the attached `manifest.json` the same: BRAT goes by the
-tag, and warns when the manifest disagrees with it.
+The commands are chained, so nothing is published from a checkout with
+uncommitted changes or from a build that failed. `--target` puts the tag on the
+commit that was built, which has to be on GitHub already. Keep the tag and the
+`version` in the attached `manifest.json` the same: BRAT goes by the tag, and
+warns when the manifest disagrees with it.
 
 [qmd]: https://github.com/tobi/qmd
 [prek]: https://prek.j178.dev/
