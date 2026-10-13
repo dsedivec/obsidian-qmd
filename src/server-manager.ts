@@ -61,7 +61,18 @@ interface StoppedGroup { pid: number; port: number; at: number }
  *
  * It never spawns on a port while a group it has itself sent SIGTERM for that port is still
  * alive: such a group holds the port, and the new server could not bind it. Every SIGTERM is
- * remembered in `stopped`, and a start waits for those groups first.
+ * remembered in `stopped`, and a start waits for those groups first. Nor does it spawn while it
+ * owns a server: a start that has waited asks for health again, and stops what it has come to
+ * own meanwhile, before it goes on.
+ *
+ * `adoptIfOurs` is to be called once, at load, and to have settled before the first
+ * `ensureRunning`. At load the plugin does so: it awaits `adoptIfOurs` before it starts the
+ * indexer, and every search waits for the indexer. (A settings change in those seconds can start
+ * the indexer sooner.) A caller that lets a start overlap the adoption's three seconds still gets
+ * both guarantees, but a worse answer: with no group of its own stopped on the port, that start
+ * spawns at once, and fails as "port in use" for as long as the hung recorded server holds the
+ * port. The adoption then stands down for the server being started, and leaves the record to the
+ * next load.
  *
  * `stopIfOwned` and `dispose` also overtake work that is waiting: on a health answer, for a
  * stopped server to be gone, or for a recorded server to answer. A start does not go on to
@@ -227,7 +238,17 @@ export class ServerManager {
     for (let wait = this.waitForStopped(port); wait > 0; wait = this.waitForStopped(port)) {
       await this.poll(() => this.waitForStopped(port) === 0, wait);
       if (this.disposed || this.stops !== stops) throw this.overtaken();
+      // Time has passed, so what the first health check found may no longer hold. A server may
+      // answer now: one that an adoption has come to own meanwhile, or another program's. It is
+      // used as it is, owned or not, and nothing is spawned.
+      const answers = await this.deps.health(port);
+      if (this.disposed || this.stops !== stops) throw this.overtaken();
+      if (answers) return;
+      // A server that came to be owned during the wait and does not answer is stopped like the
+      // one before it, and waited for in its turn.
+      this.stopOwned();
     }
+    // Nothing is owned here: `stopOwned` ran since the last health answer, with no await after it.
     const server = this.deps.spawnServer(port);
     const outcome = await this.untilStarted(port, server);
     if (outcome === "healthy") {
@@ -237,7 +258,7 @@ export class ServerManager {
       // The launcher can exit while the server it spawned lives on in the group. The PID can be
       // reused only once the whole group is gone, so only then is the server forgotten.
       void server.exit.then(() => {
-        if (this.owned === record && !this.disposed && !this.deps.isAlive(record.pid)) this.forget();
+        if (this.owned === record && !this.disposed && !this.deps.isAlive(record.pid)) this.forget(record);
       });
       return;
     }
@@ -354,13 +375,13 @@ export class ServerManager {
   /**
    * The one way to SIGTERM for a PID that was not spawned moments ago: the owned server's, or at
    * load that of a recorded server which never answered. It is signalled only if it passes the
-   * identity test now, and it is forgotten and its record cleared either way.
+   * identity test now, and it is forgotten either way.
    */
   private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-this-port"): void {
     const ours = identity === "on-this-port" ? this.isServerOnItsPort(record) : this.looksLikeQmdServer(record.pid);
     // Signal before clearing the record: a save that throws must not leave the server running.
     if (ours) this.terminate(record.pid, record.port);
-    this.forget();
+    this.forget(record);
   }
 
   /**
@@ -410,10 +431,18 @@ export class ServerManager {
     this.noteActivity();
   }
 
-  private forget(): void {
-    clearTimeout(this.idleTimer);
-    this.owned = null;
-    this.deps.saveRecord(null);
+  /**
+   * Forgets `record` and nothing else: it is no longer owned if it was the owned one, and the
+   * saved record is cleared only if it still names that server. Another server's ownership, and a
+   * record saved for another server since, are left as they are.
+   */
+  private forget(record: OwnedRecord): void {
+    if (this.owned === record) {
+      clearTimeout(this.idleTimer);
+      this.owned = null;
+    }
+    const saved = this.deps.loadRecord();
+    if (saved !== null && saved.pid === record.pid && saved.port === record.port) this.deps.saveRecord(null);
   }
 }
 
