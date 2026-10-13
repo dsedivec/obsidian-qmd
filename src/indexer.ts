@@ -159,14 +159,20 @@ export class Indexer {
   /**
    * A run belongs to the collection name it starts with. Once the setting holds another
    * name, the run stops after the command in flight: it starts nothing more, so nothing
-   * is ever added under a name that is no longer configured, and it leaves the state and
-   * the ready flag to the start() check for the new name.
+   * is ever added under a name that is no longer configured. The ready flag and the
+   * state then belong to the start() check for the new name; all the stopped run does
+   * is take down its own `running` state if that is still showing.
    */
   private async run(): Promise<void> {
     const name = this.deps.getSettings().collectionName;
     const renamed = (): boolean => !this.isConfigured(name);
+    let published: IndexState | undefined;
+    const enter = (step: Step): void => {
+      published = { kind: "running", step };
+      this.setState(published);
+    };
     try {
-      this.enter("setup");
+      enter("setup");
       const found = await this.locate(name);
       if (renamed()) return;
       if (found !== "here") this.ready = false;
@@ -176,15 +182,15 @@ export class Indexer {
         if (renamed()) return;
       }
       if (this.deps.store.get(MODELS_PULLED_KEY) !== true) {
-        this.enter("models");
+        enter("models");
         await this.qmd(["pull"], PULL_TIMEOUT_MS);
         this.deps.store.set(MODELS_PULLED_KEY, true);
         if (renamed()) return;
       }
-      this.enter("update");
+      enter("update");
       await this.qmd(["update"], UPDATE_TIMEOUT_MS);
       if (renamed()) return;
-      this.enter("embed");
+      enter("embed");
       await this.qmd(["embed", "-c", name], EMBED_TIMEOUT_MS);
       if (renamed()) return;
       this.ready = true;
@@ -192,6 +198,11 @@ export class Indexer {
       this.setState(this.idleState);
     } catch (error) {
       if (!renamed()) this.fail(messageOf(error));
+    } finally {
+      // Only a run stopped by a rename ends with its own `running` state still showing.
+      // It withdraws that state and no other, so whatever the start() check for the new
+      // name published stays; the time of the last completed run is not advanced.
+      if (this.state === published) this.setState(this.idleState);
     }
   }
 
@@ -240,10 +251,6 @@ export class Indexer {
 
   private isConfigured(name: string): boolean {
     return name === this.deps.getSettings().collectionName;
-  }
-
-  private enter(step: Step): void {
-    this.setState({ kind: "running", step });
   }
 
   private fail(message: string): void {

@@ -438,19 +438,34 @@ describe("a collection rename during a run", () => {
     gate.resolve({ ...OK, code: 1, stderr: "disk I/O error\n" }); await run;
     expect(ix.getState()).toEqual(OTHER_POINTS_ELSEWHERE);
   });
-  it("to a collection that exists: search is ready at once and the catch-up run uses the new name", async () => {
+  it.each<[string, CliResult]>([
+    ["finishes", OK],
+    ["fails", { ...OK, code: 1, stderr: "disk I/O error\n" }],
+  ])("to a collection that exists: when its command %s, the stopped run withdraws its own running state", async (_how, released) => {
     const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
     const gate = deferred<CliResult>();
-    const { deps, calls } = fake(
-      { "collection show Main": SHOW_OK, update: gate.promise, "collection show Good": SHOW_OK },
+    const { deps, calls, script } = fake(
+      { "collection show Main": SHOW_OK, "collection show Good": SHOW_OK },
       { getSettings: () => settings });
-    const ix = new Indexer(deps); await ix.start();
+    const ix = new Indexer(deps); await ix.start(); await ix.runNow();
+    const indexed = ix.getState();
+    expect(indexed).toEqual({ kind: "idle", lastIndexedAt: deps.now() });
+    await vi.advanceTimersByTimeAsync(1000);
+    script.update = gate.promise;
     const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
+    const seen: IndexState[] = [];
+    ix.onChange((s) => seen.push(s));
     settings.collectionName = "Good"; await ix.start();
     expect(await ix.whenReady()).toBe(true);
     expect(ix.getState()).toEqual({ kind: "running", step: "update" });
     const issued = calls.length;
-    gate.resolve(OK); await run; await vi.advanceTimersByTimeAsync(QUIET);
+    gate.resolve(released); await run; script.update = OK;
+    // Idle again, with the time of the last run that did finish: this one did not.
+    expect(ix.getState()).toEqual(indexed);
+    expect(seen).toEqual([indexed]);
+    expect(await ix.whenReady()).toBe(true);
+    expect(calls.slice(issued)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(QUIET);
     expect(calls.slice(issued)).toEqual([["collection", "show", "Good"], ["update"], ["embed", "-c", "Good"]]);
     expect(ix.getState()).toEqual({ kind: "idle", lastIndexedAt: deps.now() });
   });
