@@ -1,0 +1,68 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Found 5 results for \"sourdough starter hydration\":\n\n#712ac7 100% probe/HTML & markup.md - HTML & markup\n#d3ac28 38% probe/Café ☕ notes.md - Café ☕ notes\n#2643c7 25% probe/AWS EKS.md - How it works\n#c4c5bf 15% probe/\"Office\" Chairs.md - \"Office\" Chairs\n#ecf542 12% probe/Daily/2026-09-30.md - 2026-09-30"
+      }
+    ],
+    "structuredContent": {
+      "results": [
+        {
+          "docid": "#712ac7",
+          "file": "probe/HTML & markup.md",
+          "title": "HTML & markup",
+          "score": 1,
+          "context": null,
+          "line": 3,
+          "snippet": "3: @@ -2,4 @@ (1 before, 5 after)\n4: \n5: The first section explains sourdough starter hydration and needs a table of flour-to-water ratios.\n6: <img src=x onerror=\"alert(1)\">\n7: <b>bold</b> text"
+        },
+        {
+          "docid": "#d3ac28",
+          "file": "probe/Café ☕ notes.md",
+          "title": "Café ☕ notes",
+          "score": 0.38,
+          "context": null,
+          "line": 1,
+          "snippet": "1: @@ -1,3 @@ (0 before, 6 after)\n2: Dialling in espresso on the machine at the café on the corner.\n3: \n4: - Dose: 18 g in, 36 g out, in about 28 seconds."
+        },
+        {
+          "docid": "#2643c7",
+          "file": "probe/AWS EKS.md",
+          "title": "How it works",
+          "score": 0.25,
+          "context": null,
+          "line": 1,
+          "snippet": "1: @@ -1,3 @@ (0 before, 11 after)\n2: IRSA (IAM Roles for Service Accounts) is how workloads on EKS get AWS credentials without node-wide permissions.\n3: \n4: ## How it works"
+        },
+        {
+          "docid": "#c4c5bf",
+          "file": "probe/\"Office\" Chairs.md",
+          "title": "\"Office\" Chairs",
+          "score": 0.15,
+          "context": null,
+          "line": 1,
+          "snippet": "1: @@ -1,3 @@ (0 before, 7 after)\n2: Notes on ergonomics from comparing chairs for the home office.\n3: \n4: - Adjustable lumbar support matters more than a headrest for long sitting sessions."
+        },
+        {
+          "docid": "#ecf542",
+          "file": "probe/Daily/2026-09-30.md",
+          "title": "2026-09-30",
+          "score": 0.12,
+          "context": null,
+          "line": 1,
+          "snippet": "1: @@ -1,3 @@ (0 before, 4 after)\n2: - Standup: nothing blocked on my side.\n3: - Spent the morning chasing AccessDenied from the ingest job. The role was fine; the bucket policy still named the old account.\n4: - Reviewed the pull request for the retry wrapper."
+        }
+      ]
+    },
+    "resultType": "complete",
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "qmd",
+        "version": "2.8.3"
+      }
+    }
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

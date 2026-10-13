@@ -1,0 +1,4 @@
+Collection: probe
+  Path:     /private/var/folders/ab/0123456789abcdefghijklmnopqrst/T/qmd-probe-abc123/vault
+  Pattern:  **/*.md
+  Include:  yes (default)
