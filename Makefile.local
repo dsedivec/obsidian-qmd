@@ -1,0 +1,19 @@
+# QMD Search's own targets. The Makefile includes this file, and `make help`
+# lists every target here that carries a `## ` description.
+.PHONY: build integration install-plugin
+
+build: ## Typecheck, then bundle the plugin into main.js
+	npm run build
+
+# Not part of `make validate` or of any Git hook: these tests run the real
+# `qmd` against a throwaway index and take about 40 seconds.
+integration: ## Run the integration tests against the real qmd
+	npm run test:integration
+
+# Run `make build` first. The script refuses a folder that is not a vault.
+install-plugin: ## Copy the built plugin into a vault: make install-plugin VAULT=<path>
+	@if [ -z "$(VAULT)" ]; then \
+		echo "VAULT is not set. Usage: make install-plugin VAULT=<path to the vault>" >&2; \
+		exit 1; \
+	fi
+	node scripts/install-plugin.mjs "$(VAULT)"

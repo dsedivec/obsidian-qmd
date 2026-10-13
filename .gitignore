@@ -1,3 +1,14 @@
+.DS_Store
+*.log
+.env
+dist/
+
+# TypeScript
+node_modules/
+coverage/
+
+# QMD Search: agents' working files, and the plugin bundle that `npm run build`
+# writes. The bare `node_modules` also covers a symlink of that name.
 .superpowers/
 node_modules
 main.js

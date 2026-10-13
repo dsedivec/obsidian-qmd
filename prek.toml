@@ -1,0 +1,70 @@
+#:schema https://www.schemastore.org/prek.json
+#
+# This file is the single source of truth for tool versions. Every formatter,
+# linter, and type checker is pinned here by `rev` and invoked through prek, and
+# the Makefile shells out to prek rather than re-declaring anything — so a
+# version lives in exactly one place and the check you run by hand is identical
+# to the one that runs on commit. `prek list` enumerates what is enforced.
+#
+# The one exception is the TypeScript block at the bottom; see the note there.
+minimum_prek_version = "0.4.0"
+
+# prek's native hooks. They take no `rev` and install no environment, which is
+# why this block looks different from the ones below — that is correct, not an
+# omission.
+[[repos]]
+repo = "builtin"
+hooks = [
+    # tests/fixtures holds captures from a real QMD server and a fixture vault
+    # whose notes are test data. They must stay byte-exact, so every hook that
+    # rewrites or lints files skips the directory: these three, Prettier,
+    # markdownlint and ESLint.
+    { id = "trailing-whitespace", exclude = "^tests/fixtures/" },
+    { id = "end-of-file-fixer", exclude = "^tests/fixtures/" },
+    { id = "mixed-line-ending", exclude = "^tests/fixtures/" },
+    { id = "check-merge-conflict" },
+    { id = "check-added-large-files" },
+    { id = "check-case-conflict" },
+    { id = "check-symlinks" },
+    { id = "destroyed-symlinks" },
+    { id = "check-json" },
+    { id = "check-toml" },
+    { id = "check-yaml" },
+    { id = "detect-private-key" },
+    # Enforces the "never commit to main" convention. Left disabled because it
+    # also fails `prek run --all-files`, and therefore `make validate`, whenever
+    # the checkout is on main. Enable it if you never work on main.
+    # { id = "no-commit-to-branch", args = ["--branch", "main"] },
+]
+
+# Prettier formats; markdownlint reports only what a formatter cannot fix, such
+# as a long URL or a wide table cell. When the two disagree, the formatter wins
+# and the lint rule gets disabled — never the reverse, or `make validate` can
+# never reach a fixed point.
+[[repos]]
+repo = "https://github.com/rbubley/mirrors-prettier"
+rev = "v3.9.6"
+hooks = [{ id = "prettier", exclude = "^tests/fixtures/" }]
+
+[[repos]]
+repo = "https://github.com/DavidAnson/markdownlint-cli2"
+rev = "v0.23.1"
+hooks = [{ id = "markdownlint-cli2", exclude = "^tests/fixtures/" }]
+
+# The documented exception to "prek owns tool versions": there is no maintained
+# prek mirror for ESLint or `tsc`, so these are local hooks running whatever
+# `npm install` put in node_modules, and their versions are pinned in
+# package.json and package-lock.json instead. This is also why `make setup` runs
+# `npm install` before `prek install` — `language = "system"` hooks reference
+# binaries that must already exist.
+[[repos]]
+repo = "local"
+hooks = [
+    { id = "eslint", name = "eslint", language = "system", entry = "npm exec --no -- eslint --fix", files = "\\.(ts|tsx)$", exclude = "^tests/fixtures/" },
+    { id = "tsc", name = "tsc --noEmit", language = "system", entry = "npm exec --no -- tsc --noEmit", files = "\\.(ts|tsx)$", pass_filenames = false },
+    # The unit tests take about four seconds, so they gate any commit that
+    # touches src/ or tests/. The integration tests stay out of the hooks: they
+    # need the real `qmd` and take about 40 seconds. Run them with
+    # `make integration`.
+    { id = "vitest", name = "vitest run", language = "system", entry = "npm exec --no -- vitest run", files = "^(src|tests)/", pass_filenames = false },
+]

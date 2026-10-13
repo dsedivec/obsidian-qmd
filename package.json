@@ -1,8 +1,9 @@
 {
   "name": "qmd-search",
   "version": "0.1.0",
-  "private": true,
+  "description": "Search an Obsidian vault with QMD's hybrid search.",
   "type": "module",
+  "private": true,
   "scripts": {
     "build": "tsc --noEmit && node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
@@ -11,11 +12,14 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^26.6.5",
     "builtin-modules": "^5.4.0",
     "esbuild": "^0.28.2",
+    "eslint": "^10.8.0",
     "obsidian": "^1.14.4",
-    "typescript": "^7.0.2",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^5.0.4"
   }
 }

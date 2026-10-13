@@ -1,0 +1,24 @@
+# Prettier owns formatting. markdownlint only reports what Prettier cannot fix,
+# such as long URLs and wide table cells it is unable to break.
+config:
+  MD013:
+    line_length: 80
+    tables: false
+    code_blocks: false
+  MD024:
+    siblings_only: true
+  MD010:
+    # Fenced code blocks legitimately contain literal tabs (e.g. Makefile
+    # recipe lines, which Make requires). Prettier leaves code block content
+    # untouched, so this rule only needs to police prose and indentation.
+    code_blocks: false
+ignores:
+  - node_modules
+  - .venv
+  # The fixture vault's notes are test data and must stay byte-exact.
+  - tests/fixtures
+  # The spec and the plan are records of what was decided. Prettier wraps them,
+  # but they are not reworded to satisfy a rule: they hold code spans too long
+  # to break, code spans that end in a space, and fences with no language.
+  - docs/superpowers/specs
+  - docs/superpowers/plans
