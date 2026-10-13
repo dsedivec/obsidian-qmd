@@ -1,0 +1,9 @@
+{
+  "id": "qmd-search",
+  "name": "QMD Search",
+  "version": "0.1.0",
+  "minAppVersion": "1.12.2",
+  "description": "Search this vault with QMD's hybrid search.",
+  "author": "Dale Sedivec",
+  "isDesktopOnly": true
+}

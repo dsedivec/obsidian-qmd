@@ -1,0 +1,83 @@
+export interface QmdSearchSettings {
+  qmdPath: string;
+  extraPath: string;
+  collectionName: string;
+  port: number;
+  idleTimeoutMinutes: number;
+  reindexQuietMinutes: number;
+  resultCount: number;
+}
+
+export const DEFAULT_SETTINGS: QmdSearchSettings = {
+  qmdPath: "qmd",
+  extraPath: "/opt/homebrew/bin:/usr/local/bin",
+  collectionName: "",
+  port: 8181,
+  idleTimeoutMinutes: 60,
+  reindexQuietMinutes: 5,
+  resultCount: 10,
+};
+
+export interface KeyValueStore {
+  get(key: string): unknown;
+  set(key: string, value: unknown): void;
+}
+
+export function isValidCollectionName(name: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(name);
+}
+
+export function deriveCollectionName(vaultName: string): string {
+  const name = vaultName.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return name === "" ? "vault" : name;
+}
+
+function readNumber(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : undefined;
+}
+
+function clampedSetting(value: unknown, fallback: number, min: number, max: number): number {
+  const n = readNumber(value);
+  return n === undefined ? fallback : Math.min(max, Math.max(min, n));
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+export function sanitizeSettings(raw: unknown, vaultName: string): QmdSearchSettings {
+  const obj: Record<string, unknown> =
+    typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const d = DEFAULT_SETTINGS;
+
+  const qmdPath = (readString(obj.qmdPath) ?? "").trim() || d.qmdPath;
+  const extraPath = splitPath(readString(obj.extraPath) ?? d.extraPath).join(":");
+  const rawName = readString(obj.collectionName);
+  const collectionName =
+    rawName !== undefined && isValidCollectionName(rawName) ? rawName : deriveCollectionName(vaultName);
+
+  const port = readNumber(obj.port);
+
+  return {
+    qmdPath,
+    extraPath,
+    collectionName,
+    port: port !== undefined && port >= 1 && port <= 65535 ? port : d.port,
+    idleTimeoutMinutes: clampedSetting(obj.idleTimeoutMinutes, d.idleTimeoutMinutes, 1, 1440),
+    reindexQuietMinutes: clampedSetting(obj.reindexQuietMinutes, d.reindexQuietMinutes, 1, 120),
+    resultCount: clampedSetting(obj.resultCount, d.resultCount, 1, 50),
+  };
+}
+
+function splitPath(path: string): string[] {
+  return path.split(":").map((p) => p.trim()).filter((p) => p !== "");
+}
+
+/** PATH for the spawned qmd: qmd's own directory, the extras, then the inherited PATH, deduplicated. */
+export function buildPath(qmdPath: string, extraPath: string, inherited: string | undefined): string {
+  const slash = qmdPath.lastIndexOf("/");
+  const qmdDir = slash > 0 ? [qmdPath.slice(0, slash)] : [];
+  const all = [...qmdDir, ...splitPath(extraPath), ...splitPath(inherited ?? "")];
+  return [...new Set(all)].join(":");
+}
