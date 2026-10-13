@@ -41,6 +41,7 @@ describe("exclusions", () => {
     const none = createExclusionCheck({ metadataCache: {}, vault: {} }, warn);
     expect([none("a.md"), none("b.md")]).toEqual([false, false]);
     expect(warn).toHaveBeenCalledTimes(1);
+    const warnThrowing = vi.fn();
     const throwing = createExclusionCheck(
       {
         metadataCache: {
@@ -50,8 +51,9 @@ describe("exclusions", () => {
         },
         vault: {},
       },
-      vi.fn(),
+      warnThrowing,
     );
     expect(throwing("a.md")).toBe(false);
+    expect(warnThrowing).toHaveBeenCalledTimes(1);
   });
 });

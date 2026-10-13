@@ -232,6 +232,8 @@ export class SearchView extends ItemView {
     row.addEventListener("keydown", (evt) => {
       if (evt.key === "Enter") {
         evt.preventDefault();
+        // A key held down repeats: without this, Cmd-Enter would open a tab for every repeat.
+        if (evt.repeat) return;
         this.openNote(result, {
           newLeaf: Keymap.isModEvent(evt),
           focus: false,
@@ -290,6 +292,8 @@ export class SearchView extends ItemView {
     if (evt.isComposing) return;
     if (evt.key === "Enter") {
       evt.preventDefault();
+      // A key held down repeats: without this, every repeat would start the search again.
+      if (evt.repeat) return;
       void this.runSearch();
     } else if (evt.key === "ArrowDown") {
       const first = moveSelection(null, evt.key, this.rowEls.length);

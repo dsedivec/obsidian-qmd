@@ -54,6 +54,7 @@ export class QmdClient {
       }
 
       let settled = false;
+      // Not `const`: `finish` reads both, and can run with `req` still unassigned, after `http.request()` throws.
       let req: http.ClientRequest | undefined = undefined;
       let timer: NodeJS.Timeout | undefined = undefined;
       const onAbort = () =>

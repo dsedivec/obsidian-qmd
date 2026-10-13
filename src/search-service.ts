@@ -3,7 +3,7 @@ import type { ServerManager } from "./server-manager";
 import type { QmdClient } from "./qmd-client";
 import type { QmdSearchSettings } from "./config";
 import { QmdSearchError } from "./errors";
-import { toSearchResults, type SearchResult } from "./results";
+import { toSearchResults, type RawResult, type SearchResult } from "./results";
 
 export type SearchStatus = "starting" | "searching";
 
@@ -64,7 +64,7 @@ export class SearchService {
     // The server is in use from before it is asked for until the search has its answer, the retry
     // included: the idle timer must not stop it in between, not even while its health is checked.
     const release = server.hold();
-    let raw;
+    let raw: RawResult[];
     try {
       try {
         raw = await attempt();
