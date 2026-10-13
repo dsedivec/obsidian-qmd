@@ -247,7 +247,8 @@ describe("collection safety", () => {
       { "collection show Main": gate.promise, "collection show Other": SHOW_OK },
       { getSettings: () => settings });
     const ix = new Indexer(deps);
-    const run = ix.runNow();
+    const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual([["collection", "show", "Main"]]);
     settings.collectionName = "Other"; gate.resolve(SHOW_MISSING); await run;
     expect(calls.filter((c) => c[1] === "add")).toEqual([]);
     expect(calls.at(-1)).toEqual(["embed", "-c", "Other"]);
