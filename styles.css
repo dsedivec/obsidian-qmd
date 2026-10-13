@@ -197,3 +197,16 @@
 .qmd-search-footer:empty {
   display: none;
 }
+
+/* The settings tab: what the "Test" button on the QMD path found. */
+.qmd-search-setting-result:empty {
+  display: none;
+}
+
+.qmd-search-setting-result.is-ok {
+  color: var(--text-success);
+}
+
+.qmd-search-setting-result.is-error {
+  color: var(--text-error);
+}
