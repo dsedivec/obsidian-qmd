@@ -12,3 +12,7 @@ coverage/
 .superpowers/
 node_modules
 main.js
+
+# The vaults that `scripts/install-plugin.mjs` must not install into by
+# accident: one path a line, each machine's own.
+.protected-vaults

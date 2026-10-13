@@ -49,11 +49,16 @@ make install-plugin VAULT="/path/to/your vault"
 place. `make build` typechecks the code and writes `main.js`.
 `make install-plugin` copies `main.js`, `manifest.json` and `styles.css` into
 the vault's `.obsidian/plugins/qmd-search` folder. It refuses a folder that is
-not a vault. It also refuses the vault at `/Users/alex/Documents/Obsidian/Main`,
-which takes running the script itself with `--allow-main`:
+not a vault.
+
+It also refuses a vault that you have listed in `.protected-vaults`. That is a
+file of your own beside this README, which Git ignores, with one vault path a
+line. It keeps a build from landing by accident in a vault you rely on, when a
+script or a coding agent runs the install. Installing into a listed vault takes
+running the script itself with `--allow-protected`:
 
 ```sh
-node scripts/install-plugin.mjs /Users/alex/Documents/Obsidian/Main --allow-main
+node scripts/install-plugin.mjs "/path/to/your vault" --allow-protected
 ```
 
 Then, in Obsidian, turn on "QMD Search" under Settings → Community plugins.

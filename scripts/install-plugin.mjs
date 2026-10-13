@@ -1,16 +1,26 @@
 #!/usr/bin/env node
 // Copies the built plugin into a vault:
-//   node scripts/install-plugin.mjs <vault path> [--allow-main]
-// It refuses Dale's Main vault unless --allow-main is given.
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+//   node scripts/install-plugin.mjs <vault path> [--allow-protected]
+// It refuses a vault listed in .protected-vaults unless --allow-protected is given. That file sits
+// beside the README and is not in Git. It holds one vault path a line, for the vaults a build
+// must not land in by accident; a leading ~ is the home folder, and a line that starts with # is
+// a comment.
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MAIN_VAULT = "/Users/alex/Documents/Obsidian/Main";
+const PROTECTED_LIST = ".protected-vaults";
+const ALLOW = "--allow-protected";
 const PLUGIN_ID = "qmd-search";
 const FILES = ["main.js", "manifest.json", "styles.css"];
-const USAGE =
-  "Usage: node scripts/install-plugin.mjs <vault path> [--allow-main]";
+const USAGE = `Usage: node scripts/install-plugin.mjs <vault path> [${ALLOW}]`;
 
 function fail(message) {
   console.error(message);
@@ -34,27 +44,41 @@ function sameDirectory(a, b) {
   );
 }
 
+/** The vaults listed in the file at `listPath`, as absolute paths. None when there is no such file. */
+function protectedVaults(listPath) {
+  if (!existsSync(listPath)) return [];
+  return readFileSync(listPath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"))
+    .map((line) =>
+      line === "~" || line.startsWith("~/")
+        ? join(homedir(), line.slice(1))
+        : resolve(line),
+    );
+}
+
 const args = process.argv.slice(2);
 const options = args.filter((arg) => arg.startsWith("--"));
 const paths = args.filter((arg) => !arg.startsWith("--"));
-const unknown = options.find((option) => option !== "--allow-main");
+const unknown = options.find((option) => option !== ALLOW);
 if (unknown !== undefined) fail(`Unknown option ${unknown}\n${USAGE}`);
 if (paths.length !== 1) fail(USAGE);
 
+const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const vault = resolve(paths[0]);
-if (
-  (vault === MAIN_VAULT || sameDirectory(vault, MAIN_VAULT)) &&
-  !options.includes("--allow-main")
-) {
+const guarded = protectedVaults(join(root, PROTECTED_LIST)).find(
+  (listed) => vault === listed || sameDirectory(vault, listed),
+);
+if (guarded !== undefined && !options.includes(ALLOW)) {
   fail(
-    `Refusing to install into the Main vault (${MAIN_VAULT}) without --allow-main.`,
+    `Refusing to install into ${guarded}, which ${PROTECTED_LIST} lists, without ${ALLOW}.`,
   );
 }
 if (!isDirectory(join(vault, ".obsidian"))) {
   fail(`${vault} is not an Obsidian vault: it has no .obsidian folder.`);
 }
 
-const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const missing = FILES.filter((file) => !existsSync(join(root, file)));
 if (missing.length > 0)
   fail(`Missing ${missing.join(", ")} in ${root}. Run "npm run build" first.`);

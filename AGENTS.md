@@ -130,7 +130,8 @@ Run each CLI call under `timeout -k`, and wait between steps in the shell, not
 with a timer inside `eval` code: a window that is hidden runs such timers about
 once a minute, and cannot be screenshotted. Dale's Main vault may be indexed and
 searched for testing. Its notes are read-only, and nothing is installed there
-without asking.
+without asking: it is listed in `.protected-vaults`, so the install script
+refuses it unless it is given `--allow-protected`.
 
 ### Where the reasoning lives
 
