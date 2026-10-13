@@ -13,9 +13,13 @@ interface FakeOptions {
   spawnPid: number | undefined;
   record: OwnedRecord | null;
   log: string;
-  /** PIDs that are running. A spawned server is added, and removed again when it exits. */
+  /**
+   * PIDs whose process group still has a live member. A spawned server is added. It is removed
+   * when its launcher exits, unless `groupSurvivesExit` says the server it spawned lives on.
+   */
   alive: number[];
-  /** The command line reported for every PID. */
+  groupSurvivesExit: boolean;
+  /** The command lines reported for every process group. */
   cmd: string | null;
   /** While true, each health check stays unanswered until `answerHealth` is called for it. */
   deferHealth: boolean;
@@ -51,6 +55,7 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
     record: null,
     log: "",
     cmd: QMD_CMD,
+    groupSurvivesExit: false,
     deferHealth: false,
     saveThrows: false,
     ...over,
@@ -71,7 +76,7 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
         earlyExit = result;
         return;
       }
-      s.alive = s.alive.filter((pid) => pid !== server.pid);
+      if (!s.groupSurvivesExit) s.alive = s.alive.filter((pid) => pid !== server.pid);
       server.resolve(result);
     },
   };
@@ -490,7 +495,7 @@ describe("ServerManager checks a PID is still its server before SIGTERM", () => 
 });
 
 describe("ServerManager when its server exits", () => {
-  it("forgets a server whose launcher exits after it started, and signals nothing", async () => {
+  it("forgets a server once its launcher has exited and its group is gone, and signals nothing", async () => {
     const { m, s } = await started();
     s.exit({ code: 1 });
     await vi.advanceTimersByTimeAsync(0);
@@ -501,14 +506,76 @@ describe("ServerManager when its server exits", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(s.killed).toEqual([]); expect(s.record).toBeNull();
   });
-  it("does not signal the PID of an exited launcher even when another qmd server now has it", async () => {
+  it("does not signal the PID of a group that is gone even when another qmd server has it later", async () => {
     const { m, s } = await started();
     s.exit({ code: 0 });
+    await flush();
     s.alive.push(4242);
     await vi.advanceTimersByTimeAsync(120 * MIN);
     m.stopIfOwned();
     await vi.advanceTimersByTimeAsync(5000);
     expect(s.killed).toEqual([]);
+  });
+  it("keeps owning a server whose launcher exits while its group lives on, and the idle timer still stops it", async () => {
+    const { s } = await started({ groupSurvivesExit: true });
+    s.exit({ code: null });
+    await flush();
+    expect(s.record).toEqual({ pid: 4242, port: 8181 }); expect(s.killed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+  });
+  it("keeps owning a server whose launcher exits while its group lives on, and stopIfOwned still stops it", async () => {
+    const { m, s } = await started({ groupSurvivesExit: true });
+    s.exit({ code: null });
+    await flush();
+    m.stopIfOwned();
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+  });
+  it("forgets without signalling when the surviving group has died by the time it is stopped", async () => {
+    const { m, s } = await started({ groupSurvivesExit: true });
+    s.exit({ code: null });
+    await flush();
+    s.alive = [];
+    m.stopIfOwned();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull();
+  });
+  it("stops the group left behind when the launcher exits during startup", async () => {
+    const log = "Port 8181 already in use. Try a different port with --port.\n";
+    // The command line is unreadable here: a live group is enough, since it was spawned moments ago.
+    const { deps, s } = fake({ healthy: false, log, groupSurvivesExit: true, cmd: null });
+    const call = watch(new ServerManager(deps).ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    s.exit({ code: 1 });
+    await flush();
+    expect(call.state).toBe("rejected"); expect(call.error).toMatchObject({ kind: "port-in-use", detail: log });
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+  });
+  it("signals nothing when the launcher exits during startup and its group is gone", async () => {
+    const { deps, s } = fake({ healthy: false, log: "weird\n" });
+    const call = watch(new ServerManager(deps).ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    s.exit({ code: 1 });
+    await flush();
+    expect(call.state).toBe("rejected"); expect(call.error).toMatchObject({ kind: "server-start", detail: "weird\n" });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull();
+  });
+  it("signals nothing when a spawn with no pid reports its failure", async () => {
+    const { deps, s } = fake({ healthy: false, spawnPid: undefined, groupSurvivesExit: true });
+    const isAlive = vi.spyOn(deps, "isAlive");
+    const call = watch(new ServerManager(deps).ensureRunning());
+    s.exit({ code: null, errorCode: "ENOENT" });
+    await flush();
+    expect(call.state).toBe("rejected"); expect(call.error).toMatchObject({ kind: "qmd-not-found" });
+    expect(isAlive).not.toHaveBeenCalled(); expect(s.killed).toEqual([]); expect(vi.getTimerCount()).toBe(0);
   });
   it("keeps the replacement on record when the server it replaced exits later", async () => {
     const { m, s } = await started();

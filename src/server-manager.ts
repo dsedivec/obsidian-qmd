@@ -2,7 +2,11 @@ import { classifyStartFailure, QmdSearchError } from "./errors";
 
 export interface OwnedRecord { pid: number; port: number }
 export interface SpawnExit { code: number | null; errorCode?: string }
-/** `pid` is undefined when the spawn itself failed. `exit` resolves when the launcher exits or could not be spawned; it never rejects. */
+/**
+ * `pid` is the launcher, which leads the process group the server runs in; it is undefined when
+ * the spawn itself failed. `exit` resolves when the launcher exits or could not be spawned, and
+ * never rejects. The launcher exiting does not mean the group is gone: the server is its child.
+ */
 export interface SpawnedServer { pid: number | undefined; exit: Promise<SpawnExit> }
 export interface ServerDeps {
   getSettings(): { port: number; idleTimeoutMinutes: number };
@@ -10,7 +14,12 @@ export interface ServerDeps {
   health(port: number): Promise<boolean>;
   spawnServer(port: number): SpawnedServer;
   logTail(port: number): string;
+  /** True while the process group led by `pid` still has a live member, whether or not `pid` itself does. */
   isAlive(pid: number): boolean;
+  /**
+   * The command lines of the live processes in the group led by `pid`, joined with newlines, or
+   * null when there are none or they cannot be read.
+   */
   commandLine(pid: number): string | null;
   /** Signals the process group led by `pid`. Does nothing when the group is already gone. */
   killGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): void;
@@ -34,8 +43,9 @@ type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
  * `pending`, then in `owned`), or with one from a saved record that passed every check in
  * `adoptIfOurs` (held in `owned`). A server that merely answers health is neither, and is never
- * signalled. An owned PID is checked again right before SIGTERM, and forgotten as soon as its
- * launcher is seen to exit, so a PID that died and was reused is not signalled either.
+ * signalled. An owned PID is checked again right before SIGTERM, and forgotten once its launcher
+ * has exited and its process group is gone, so a PID that died and was reused is not signalled
+ * either. Every PID here names a process group: the launcher leads it and the server is in it.
  *
  * `stopIfOwned` and `dispose` also overtake work that is waiting on a health answer: a start
  * does not go on to spawn, and an adoption does not go on to own. After `dispose` the manager
@@ -145,15 +155,20 @@ export class ServerManager {
       if (server.pid === undefined) return;
       const record = { pid: server.pid, port };
       this.own(record);
-      // Once the launcher has exited its PID can be reused, so it must not stay on record.
+      // The launcher can exit while the server it spawned lives on in the group. The PID can be
+      // reused only once the whole group is gone, so only then is the server forgotten.
       void server.exit.then(() => {
-        if (this.owned === record && !this.disposed) this.forget();
+        if (this.owned === record && !this.disposed && !this.deps.isAlive(record.pid)) this.forget();
       });
       return;
     }
     if (outcome === "stopped") throw this.overtaken();
-    // As above: this PID has not exited since `spawnServer` returned it, so there is no identity check.
-    if (outcome === "timeout" && server.pid !== undefined) this.terminate(server.pid);
+    // The start failed: 60 seconds passed, or the launcher exited. After a timeout the group is
+    // still there; after an exit the server the launcher spawned may be. Either way it is the
+    // group `spawnServer` created moments ago, so there is no identity check.
+    if (server.pid !== undefined && (outcome === "timeout" || this.deps.isAlive(server.pid))) {
+      this.terminate(server.pid);
+    }
     const tail = this.deps.logTail(port);
     const errorCode = typeof outcome === "object" ? outcome.errorCode : undefined;
     throw new QmdSearchError(classifyStartFailure(tail, errorCode), "The QMD server did not start.", tail);
@@ -190,7 +205,9 @@ export class ServerManager {
       const pending = { pid: server.pid, abort: (): void => settle("stopped") };
       this.pending = pending;
       void server.exit.then((exit) => {
-        release(); // Even after `dispose` stopped the wait: an exited PID must not be signalled.
+        // A start that `dispose` stopped gives up its PID here too. With the launcher gone there
+        // would be no later sign of the group ending, and so of the PID becoming reusable.
+        release();
         settle(exit);
       });
       poll();
@@ -212,9 +229,9 @@ export class ServerManager {
   }
 
   /**
-   * The identity test for a PID the manager did not just spawn: alive, with a command line naming
-   * both qmd and mcp. Adoption requires it, and so does every SIGTERM to an owned server, in case
-   * the PID died and was reused.
+   * The identity test for a process group the manager did not just spawn: it still has a live
+   * member, and its command lines name both qmd and mcp. Adoption requires it, and so does every
+   * SIGTERM to an owned server, in case the group died and its PID was reused.
    */
   private looksLikeQmdServer(pid: number): boolean {
     if (!this.deps.isAlive(pid)) return false;
@@ -226,8 +243,7 @@ export class ServerManager {
   private terminate(pid: number): void {
     this.deps.killGroup(pid, "SIGTERM");
     if (this.disposed) return;
-    // Unconditional: the launcher is gone by now, so its PID says nothing about the server it
-    // spawned, and `killGroup` does nothing once the whole group is gone.
+    // Unconditional: `killGroup` does nothing once the whole group is gone.
     const timer = setTimeout(() => {
       this.killTimers.delete(timer);
       this.deps.killGroup(pid, "SIGKILL");
