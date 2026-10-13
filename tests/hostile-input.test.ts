@@ -192,7 +192,7 @@ describe("SearchService", () => {
     const query = vi.fn<QmdClient["query"]>(async () => []);
     const service = new SearchService({
       indexer: { whenReady: async () => true, getState: () => ({ kind: "idle" }) },
-      server: { ensureRunning: async () => {}, noteActivity: () => {} },
+      server: { ensureRunning: async () => {}, noteActivity: () => {}, hold: () => () => {} },
       client: { query },
       getSettings: () => ({ collectionName: "Main", resultCount: 3 }),
       fileExists: () => true,

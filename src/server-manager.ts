@@ -27,9 +27,13 @@ export interface ServerDeps {
   saveRecord(record: OwnedRecord | null): void;
 }
 
-const HEALTH_POLL_MS = 250;
+const POLL_MS = 250;
 const STARTUP_LIMIT_MS = 60_000;
 const KILL_GRACE_MS = 5_000;
+/** How long a start waits for the server it has just stopped to be gone. Longer than `KILL_GRACE_MS`, so that the SIGKILL has landed. */
+const REPLACE_WAIT_MS = 6_000;
+/** How long a recorded server has at load to answer health before it is taken for hung. */
+const ADOPT_WAIT_MS = 3_000;
 const SHUT_DOWN = "The QMD server manager was shut down.";
 const CANCELLED = "The QMD server start was cancelled.";
 
@@ -41,29 +45,38 @@ type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
  * Makes sure a QMD server is reachable and stops only its own.
  *
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
- * `pending`, then in `owned`), or with one from a saved record that passed every check in
- * `adoptIfOurs` (held in `owned`). A server that merely answers health is neither, and is never
- * signalled. An owned PID is checked again right before SIGTERM, and forgotten once its launcher
- * has exited and its process group is gone, so a PID that died and was reused is not signalled
- * either. Every PID here names a process group: the launcher leads it and the server is in it.
+ * `pending`, then in `owned`), or with one from a saved record that passed the checks in
+ * `adoptIfOurs`: either it answered health (held in `owned`), or it never did and its command
+ * line names this port's server (never held, only stopped). A server that merely answers health
+ * is none of these, and is never signalled. A PID that was not spawned moments ago is checked
+ * again right before SIGTERM, in `stopRecorded` and nowhere else. An owned PID is forgotten once
+ * its launcher has exited and its process group is gone, so a PID that died and was reused is
+ * not signalled either. Every PID here names a process group: the launcher leads it and the
+ * server is in it.
  *
- * `stopIfOwned` and `dispose` also overtake work that is waiting on a health answer: a start
- * does not go on to spawn, and an adoption does not go on to own. After `dispose` the manager
- * spawns nothing, owns nothing new and never arms the idle timer again; only `stopIfOwned` still
- * acts. A SIGKILL follow-up is the one timer `dispose` leaves alone.
+ * `stopIfOwned` and `dispose` also overtake work that is waiting: on a health answer, for a
+ * stopped server to be gone, or for a recorded server to answer. A start does not go on to
+ * spawn, and an adoption does not go on to own or to signal. After `dispose` the manager spawns
+ * nothing, owns nothing new and never arms the idle timer again; only `stopIfOwned` still acts.
+ * A SIGKILL follow-up is the one timer `dispose` leaves alone.
  */
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
   private owned: OwnedRecord | null = null;
   /** The server this manager spawned that has not answered health yet and has not exited. */
   private pending: { pid: number | undefined; abort(): void } | null = null;
-  /** The attempt that `ensureRunning` calls join, with the callers waiting to hear whether it spawns. */
+  /** The attempt that `ensureRunning` calls join. */
   private attempt: Promise<void> | null = null;
-  private listeners: StatusListener[] = [];
-  /** Counts `stopIfOwned` calls, so work that awaited a health answer can tell it was overtaken. */
+  /** The callers of that attempt that have yet to hear that it is starting a server, or null once they have. */
+  private listeners: StatusListener[] | null = null;
+  /** Counts `stopIfOwned` calls, so work that waited can tell it was overtaken. */
   private stops = 0;
   private disposed = false;
   private idleTimer: Timer | undefined;
+  /** The holds not yet released. The idle timer is not armed while there are any. */
+  private holds = 0;
+  /** Ends each `poll` in progress. `stopIfOwned` and `dispose` call them all. */
+  private readonly polls = new Set<() => void>();
 
   constructor(private readonly deps: ServerDeps) {}
 
@@ -79,26 +92,49 @@ export class ServerManager {
       this.listeners = listeners;
     }
     if (onStatus) {
-      if (this.pending) onStatus("starting");
-      else this.listeners.push(onStatus);
+      if (this.listeners) this.listeners.push(onStatus);
+      else onStatus("starting");
     }
     return this.attempt;
   }
 
-  /** Restarts the idle timer of an owned server. */
+  /** Restarts the idle timer of an owned server. Does nothing while a hold is outstanding. */
   noteActivity(): void {
     clearTimeout(this.idleTimer);
-    if (this.disposed || !this.owned) return;
+    if (this.disposed || !this.owned || this.holds > 0) return;
     const { idleTimeoutMinutes } = this.deps.getSettings();
     this.idleTimer = setTimeout(() => this.stopOwned(), idleTimeoutMinutes * 60_000);
   }
 
+  /**
+   * Marks the server as in use. The idle timer does not run while any hold is outstanding.
+   * Returns a release function; calling it more than once is harmless. When the last hold is
+   * released, the idle timer starts afresh.
+   *
+   * A hold pauses the idle timer and nothing else: `stopIfOwned`, `dispose` and the stop of a
+   * server that no longer answers all go ahead. It is counted whether or not a server is owned,
+   * so a server that comes to be owned during a hold gets its idle timer at the release.
+   */
+  hold(): () => void {
+    if (this.disposed) return () => {};
+    this.holds++;
+    clearTimeout(this.idleTimer);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.holds--;
+      if (this.holds === 0) this.noteActivity();
+    };
+  }
+
   /** Synchronous, so it is safe to call from `beforeunload`. */
   stopIfOwned(): void {
-    // Overtake a start or adoption that is waiting on a health answer, and detach the attempt in
-    // flight so that a call made from now on begins a fresh one.
+    // Overtake a start or adoption that is waiting, and detach the attempt in flight so that a
+    // call made from now on begins a fresh one.
     this.stops++;
     this.attempt = null;
+    this.endPolls();
     const starting = this.pending;
     this.pending = null;
     starting?.abort();
@@ -107,34 +143,46 @@ export class ServerManager {
     this.stopOwned();
   }
 
-  /** Crash recovery: takes back a server recorded by an earlier session, or clears the record. */
+  /**
+   * Crash recovery, for a server recorded by an earlier session. One that answers health is taken
+   * back as owned. One that does not answer within three seconds, and is this port's server by
+   * its command line, is stopped: nothing else would ever stop it. Otherwise the record is
+   * cleared and nothing is signalled.
+   */
   async adoptIfOurs(): Promise<void> {
     if (this.disposed) return;
     const record = this.deps.loadRecord();
     if (!record) return;
     // A group signal to PID 0 or 1 would reach the group of this process, or every process. Such
     // a record is discarded before anything is asked about its PID.
-    if (!Number.isInteger(record.pid) || record.pid <= 1) {
+    if (!isUsablePid(record.pid)) {
+      this.deps.saveRecord(null);
+      return;
+    }
+    // A server this session spawned takes precedence, and its outcome settles the record.
+    if (this.owned || this.pending) return;
+    if (record.port !== this.deps.getSettings().port || !this.looksLikeQmdServer(record.pid)) {
       this.deps.saveRecord(null);
       return;
     }
     const stops = this.stops;
-    const ours =
-      record.port === this.deps.getSettings().port &&
-      this.looksLikeQmdServer(record.pid) &&
-      (await this.deps.health(record.port));
-    // Overtaken by a stop or a shutdown: own nothing, and leave the record for a later session.
+    // A fair chance to answer: a server that is busy for a moment is still worth keeping.
+    const answered = await this.poll(() => this.deps.health(record.port), ADOPT_WAIT_MS);
+    // Overtaken by a stop or a shutdown: own nothing, signal nothing, and leave the record for a
+    // later session.
     if (this.disposed || this.stops !== stops) return;
-    // A server this session spawned takes precedence, and its outcome settles the record.
     if (this.owned || this.pending) return;
-    if (ours) this.own(record);
-    else this.deps.saveRecord(null);
+    if (answered) this.own(record);
+    // Hung, and never owned by this session. With no health answer to vouch for it, it is
+    // signalled only if its command line names this very port; the record is cleared either way.
+    else this.stopRecorded(record, "on-this-port");
   }
 
   /**
-   * Shuts the manager down for good. It clears the idle timer and the startup timers, fails a
-   * start that is waiting, and sends no signal. From then on `ensureRunning` rejects, and
-   * `noteActivity` and `adoptIfOurs` do nothing; `stopIfOwned` still works.
+   * Shuts the manager down for good. It clears the idle timer, the startup timers and the timers
+   * of every other wait, fails a start that is waiting, and sends no signal. From then on
+   * `ensureRunning` rejects, `noteActivity` and `adoptIfOurs` do nothing, and `hold` counts
+   * nothing; `stopIfOwned` still works.
    *
    * It does not cancel a SIGKILL follow-up: a server that ignores SIGTERM must still be killed
    * after the plugin unloads. When Obsidian itself quits, the page goes away and that timer never
@@ -144,6 +192,7 @@ export class ServerManager {
     this.disposed = true;
     clearTimeout(this.idleTimer);
     this.pending?.abort();
+    this.endPolls();
   }
 
   private async start(listeners: StatusListener[]): Promise<void> {
@@ -153,8 +202,16 @@ export class ServerManager {
     if (this.disposed || this.stops !== stops) throw this.overtaken();
     if (healthy) return;
     // An owned server that does not answer is stopped and replaced.
-    this.stopOwned();
+    const stopping = this.stopOwned();
+    // From here on a caller that joins this attempt is told at once.
+    if (this.listeners === listeners) this.listeners = null;
     for (const listener of listeners) listener("starting");
+    if (stopping !== undefined) {
+      // Until that server is gone it holds the port, and a replacement could not bind it. A server
+      // that does not act on SIGTERM goes at the SIGKILL; past that, the spawn is tried anyway.
+      await this.poll(() => !this.deps.isAlive(stopping), REPLACE_WAIT_MS);
+      if (this.disposed || this.stops !== stops) throw this.overtaken();
+    }
     const server = this.deps.spawnServer(port);
     const outcome = await this.untilStarted(port, server);
     if (outcome === "healthy") {
@@ -205,7 +262,7 @@ export class ServerManager {
             if (healthy) settle("healthy");
             else poll();
           });
-        }, HEALTH_POLL_MS);
+        }, POLL_MS);
       };
       const deadline = setTimeout(() => settle("timeout"), STARTUP_LIMIT_MS);
       const pending = { pid: server.pid, abort: (): void => settle("stopped") };
@@ -220,32 +277,95 @@ export class ServerManager {
     });
   }
 
+  /**
+   * Asks `ask` now, and again 250 ms after each no, until it says yes or `limitMs` have passed.
+   * Resolves true for a yes and false otherwise. `stopIfOwned` and `dispose` end it at once, with
+   * false and with its timers cleared; the caller tells that from `stops` and `disposed`.
+   */
+  private poll(ask: () => boolean | Promise<boolean>, limitMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let pollTimer: Timer | undefined;
+      const settle = (answer: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(pollTimer);
+        clearTimeout(deadline);
+        this.polls.delete(end);
+        resolve(answer);
+      };
+      const end = (): void => settle(false);
+      const check = async (): Promise<void> => {
+        const yes = await ask();
+        // An answer that comes after the limit, or after a stop, counts for nothing.
+        if (settled) return;
+        if (yes) settle(true);
+        else pollTimer = setTimeout(() => void check(), POLL_MS);
+      };
+      const deadline = setTimeout(end, limitMs);
+      this.polls.add(end);
+      void check();
+    });
+  }
+
+  private endPolls(): void {
+    for (const end of [...this.polls]) end();
+  }
+
   /** Why a start that `stopIfOwned` or `dispose` overtook fails. */
   private overtaken(): QmdSearchError {
     return new QmdSearchError("server-start", this.disposed ? SHUT_DOWN : CANCELLED);
   }
 
-  /** Stops the owned server if its PID still looks like a QMD server, and forgets it either way. */
-  private stopOwned(): void {
-    const record = this.owned;
-    if (!record) return;
+  /**
+   * Stops the owned server if its PID still looks like a QMD server, and forgets it either way.
+   * Returns the PID it signalled, or undefined when it signalled nothing.
+   */
+  private stopOwned(): number | undefined {
+    return this.owned ? this.stopRecorded(this.owned, "qmd-server") : undefined;
+  }
+
+  /**
+   * The one way to SIGTERM for a PID that was not spawned moments ago: the owned server's, or at
+   * load that of a recorded server which never answered. It is signalled only if it passes the
+   * identity test now, and it is forgotten and its record cleared either way. Returns the PID it
+   * signalled, or undefined when it signalled nothing.
+   */
+  private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-this-port"): number | undefined {
+    const ours = identity === "on-this-port" ? this.isServerOnItsPort(record) : this.looksLikeQmdServer(record.pid);
     // Signal before clearing the record: a save that throws must not leave the server running.
-    if (this.looksLikeQmdServer(record.pid)) this.terminate(record.pid);
+    if (ours) this.terminate(record.pid);
     this.forget();
+    return ours ? record.pid : undefined;
   }
 
   /**
    * The identity test for a process group the manager did not just spawn: it still has a live
    * member, and one of its processes has a command line naming both qmd and mcp. Adoption
    * requires it, and so does every SIGTERM to an owned server, in case the group died and its PID
-   * was reused.
+   * was reused. With `port`, that same command line must also pass `--port` with that port.
    */
-  private looksLikeQmdServer(pid: number): boolean {
+  private looksLikeQmdServer(pid: number, port?: number): boolean {
     if (!this.deps.isAlive(pid)) return false;
     const commandLines = this.deps.commandLine(pid);
     if (commandLines === null) return false;
     // Line by line: `qmd` in one process and `mcp` in another does not make either the server.
-    return commandLines.split("\n").some((line) => line.includes("qmd") && line.includes("mcp"));
+    return commandLines
+      .split("\n")
+      .some((line) => line.includes("qmd") && line.includes("mcp") && (port === undefined || namesPort(line, port)));
+  }
+
+  /**
+   * The stricter identity test, for a recorded server that is signalled without ever having
+   * answered health: a usable PID, the port that is set now, a live group, and in it one process
+   * whose command line names qmd, mcp and `--port` with that port.
+   */
+  private isServerOnItsPort(record: OwnedRecord): boolean {
+    return (
+      isUsablePid(record.pid) &&
+      record.port === this.deps.getSettings().port &&
+      this.looksLikeQmdServer(record.pid, record.port)
+    );
   }
 
   /** SIGTERM now, SIGKILL five seconds later. Nothing cancels the SIGKILL, `dispose` included. */
@@ -266,4 +386,15 @@ export class ServerManager {
     this.owned = null;
     this.deps.saveRecord(null);
   }
+}
+
+/** A PID that a group signal may be sent to. One to 0 or 1 would reach this process's own group, or every process. */
+function isUsablePid(pid: number): boolean {
+  return Number.isInteger(pid) && pid > 1;
+}
+
+/** True when the command line passes `--port` with exactly this port as the argument after it. */
+function namesPort(commandLine: string, port: number): boolean {
+  const args = commandLine.split(/\s+/);
+  return args.some((arg, i) => arg === "--port" && args[i + 1] === String(port));
 }

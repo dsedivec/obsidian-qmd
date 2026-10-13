@@ -15,7 +15,7 @@ export interface SearchOptions {
 
 export interface SearchServiceDeps {
   indexer: Pick<Indexer, "whenReady" | "getState">;
-  server: Pick<ServerManager, "ensureRunning" | "noteActivity">;
+  server: Pick<ServerManager, "ensureRunning" | "noteActivity" | "hold">;
   client: Pick<QmdClient, "query">;
   getSettings: () => Pick<QmdSearchSettings, "collectionName" | "resultCount">;
   fileExists: (vaultPath: string) => boolean;
@@ -46,8 +46,15 @@ export class SearchService {
     const attempt = async () => {
       await server.ensureRunning(onStatus);
       if (signal?.aborted) throw aborted();
-      onStatus?.("searching");
-      return client.query(query, { collection: settings.collectionName, limit: wanted * 2, signal });
+      // The server is in use until the query has its answer: its idle timer must not stop it meanwhile.
+      const release = server.hold();
+      try {
+        onStatus?.("searching");
+        // Awaited here, so that the hold lasts for the whole of the query.
+        return await client.query(query, { collection: settings.collectionName, limit: wanted * 2, signal });
+      } finally {
+        release();
+      }
     };
 
     let raw;
