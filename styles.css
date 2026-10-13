@@ -13,7 +13,9 @@
  * Obsidian's status bar floats over the bottom of the right sidebar. Leave it the room that
  * Obsidian's own panes leave there, or it covers the footer.
  */
-.mod-right-split .workspace-leaf-content[data-type="qmd-search-view"] .view-content {
+.mod-right-split
+  .workspace-leaf-content[data-type="qmd-search-view"]
+  .view-content {
   padding-bottom: var(--size-4-8);
 }
 

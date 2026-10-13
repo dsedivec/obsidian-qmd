@@ -16,12 +16,18 @@ const STEP_TEXT = {
   embed: "embedding",
 } as const;
 
-export function footerText(count: number | null, state: IndexState, now: number): { text: string; error: boolean } {
+export function footerText(
+  count: number | null,
+  state: IndexState,
+  now: number,
+): { text: string; error: boolean } {
   const parts: string[] = [];
-  if (count !== null) parts.push(`${count} ${count === 1 ? "result" : "results"}`);
+  if (count !== null)
+    parts.push(`${count} ${count === 1 ? "result" : "results"}`);
   let error = false;
   if (state.kind === "idle") {
-    if (state.lastIndexedAt !== undefined) parts.push(`indexed ${formatAge(now - state.lastIndexedAt)}`);
+    if (state.lastIndexedAt !== undefined)
+      parts.push(`indexed ${formatAge(now - state.lastIndexedAt)}`);
   } else if (state.kind === "running") {
     parts.push(`indexing… (${STEP_TEXT[state.step]})`);
   } else {
@@ -38,7 +44,11 @@ export function statusText(status: SearchStatus, elapsedMs: number): string {
 }
 
 /** Index of the selected result, or null when the input has focus. */
-export function moveSelection(current: number | null, key: "ArrowUp" | "ArrowDown", count: number): number | null {
+export function moveSelection(
+  current: number | null,
+  key: "ArrowUp" | "ArrowDown",
+  count: number,
+): number | null {
   if (key === "ArrowDown") {
     if (current === null) return count > 0 ? 0 : null;
     return Math.min(current + 1, count - 1);
@@ -53,6 +63,8 @@ export function folderLabel(folder: string): string {
 }
 
 export function scorePercent(score: number): string {
-  const pct = Number.isNaN(score) ? 0 : Math.min(100, Math.max(0, Math.round(score * 100)));
+  const pct = Number.isNaN(score)
+    ? 0
+    : Math.min(100, Math.max(0, Math.round(score * 100)));
   return `${pct}%`;
 }

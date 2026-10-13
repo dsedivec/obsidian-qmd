@@ -1,19 +1,38 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS, type KeyValueStore, type QmdSearchSettings } from "../src/config";
+import {
+  DEFAULT_SETTINGS,
+  type KeyValueStore,
+  type QmdSearchSettings,
+} from "../src/config";
 import { QmdCli } from "../src/qmd-cli";
-import { checkHealth, createServerDeps, SERVER_RECORD_KEY, serverLogPath } from "../src/server-deps";
+import {
+  checkHealth,
+  createServerDeps,
+  SERVER_RECORD_KEY,
+  serverLogPath,
+} from "../src/server-deps";
 import type { ServerDeps, SpawnedServer } from "../src/server-manager";
 
 function memoryStore(): KeyValueStore {
   const values = new Map<string, unknown>();
-  return { get: (key) => values.get(key), set: (key, value) => void values.set(key, value) };
+  return {
+    get: (key) => values.get(key),
+    set: (key, value) => void values.set(key, value),
+  };
 }
 
 async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -23,7 +42,8 @@ async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
 }
 
 /** Blocks the event loop, so that Node cannot reap a child in the meantime. */
-const sleepSync = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const sleepSync = (ms: number): void =>
+  void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /** Like `waitFor`, but it never yields to the event loop. */
 function waitForSync(cond: () => boolean, timeoutMs = 5000): void {
@@ -33,7 +53,9 @@ function waitForSync(cond: () => boolean, timeoutMs = 5000): void {
 }
 
 const ps = (pid: number, keyword: string): string =>
-  execFileSync("/bin/ps", ["-p", String(pid), "-o", `${keyword}=`], { encoding: "utf8" }).trim();
+  execFileSync("/bin/ps", ["-p", String(pid), "-o", `${keyword}=`], {
+    encoding: "utf8",
+  }).trim();
 const groupOf = (pid: number): number => Number(ps(pid, "pgid"));
 /** True for a process that has exited and has not been reaped. */
 const isZombie = (pid: number): boolean => ps(pid, "stat").startsWith("Z");
@@ -51,12 +73,19 @@ describe("server-deps", () => {
   let server: http.Server;
   /** The fake HTTP server's port. It is this run's alone, so it also names a log file nothing else uses. */
   let port: number;
-  let seen: { method?: string; url?: string; headers: http.IncomingHttpHeaders };
+  let seen: {
+    method?: string;
+    url?: string;
+    headers: http.IncomingHttpHeaders;
+  };
   let handler: (req: http.IncomingMessage, res: http.ServerResponse) => void;
   const sockets = new Set<net.Socket>();
 
   const respondRaw = (status: number, body: string) => {
-    handler = (_req, res) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(body); };
+    handler = (_req, res) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(body);
+    };
   };
 
   beforeEach(async () => {
@@ -66,7 +95,10 @@ describe("server-deps", () => {
       seen = { method: req.method, url: req.url, headers: req.headers };
       handler(req, res);
     });
-    server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
+    server.on("connection", (s) => {
+      sockets.add(s);
+      s.on("close", () => sockets.delete(s));
+    });
     await new Promise<void>((r) => server.listen(0, "localhost", r));
     port = (server.address() as net.AddressInfo).port;
   });
@@ -78,8 +110,10 @@ describe("server-deps", () => {
 
   describe("checkHealth", () => {
     it.each([
-      [200, '{"status":"ok","uptime":3}', true], [200, '{"status":"starting"}', false],
-      [200, "hello", false], [500, '{"status":"ok"}', false],
+      [200, '{"status":"ok","uptime":3}', true],
+      [200, '{"status":"starting"}', false],
+      [200, "hello", false],
+      [500, '{"status":"ok"}', false],
     ])("status %i body %j gives %j", async (status, body, expected) => {
       respondRaw(status, body);
       expect(await checkHealth(port)).toBe(expected);
@@ -119,7 +153,9 @@ describe("server-deps", () => {
   });
 
   it("names the log file by port", () => {
-    expect(serverLogPath(8181)).toBe(join(tmpdir(), "qmd-search-server-8181.log"));
+    expect(serverLogPath(8181)).toBe(
+      join(tmpdir(), "qmd-search-server-8181.log"),
+    );
   });
 
   describe("createServerDeps", () => {
@@ -149,8 +185,14 @@ describe("server-deps", () => {
     }
 
     /** A stand-in for the launcher: it starts a child of its own, reports it, and waits. */
-    async function spawnLauncher(): Promise<{ pid: number; child: number; exit: SpawnedServer["exit"] }> {
-      fakeQmd('echo "args:$*"\necho "path:$PATH"\necho "on stderr" >&2\nsleep 300 &\necho "child:$!"\nwait');
+    async function spawnLauncher(): Promise<{
+      pid: number;
+      child: number;
+      exit: SpawnedServer["exit"];
+    }> {
+      fakeQmd(
+        'echo "args:$*"\necho "path:$PATH"\necho "on stderr" >&2\nsleep 300 &\necho "child:$!"\nwait',
+      );
       const { pid, exit } = spawnServer();
       await waitFor(() => /child:\d+/.test(readLog()));
       const child = Number(/child:(\d+)/.exec(readLog())![1]);
@@ -160,7 +202,13 @@ describe("server-deps", () => {
 
     beforeEach(() => {
       dir = mkdtempSync(join(tmpdir(), "qmd-search-deps-"));
-      settings = { ...DEFAULT_SETTINGS, qmdPath: join(dir, "qmd"), extraPath: "/extra/one", port, idleTimeoutMinutes: 7 };
+      settings = {
+        ...DEFAULT_SETTINGS,
+        qmdPath: join(dir, "qmd"),
+        extraPath: "/extra/one",
+        port,
+        idleTimeoutMinutes: 7,
+      };
       store = memoryStore();
       cli = new QmdCli(() => settings);
       deps = createServerDeps({ cli, getSettings: () => settings, store });
@@ -191,14 +239,19 @@ describe("server-deps", () => {
       const { child } = await spawnLauncher();
       const path = cli.env().PATH!;
       expect(path.startsWith(`${dir}:/extra/one:`)).toBe(true);
-      expect(readLog()).toBe(`args:mcp --http --port ${port}\npath:${path}\non stderr\nchild:${child}\n`);
+      expect(readLog()).toBe(
+        `args:mcp --http --port ${port}\npath:${path}\non stderr\nchild:${child}\n`,
+      );
     });
 
     it("isAlive and commandLine describe the launcher's whole group: the launcher and its child", async () => {
       const { pid } = await spawnLauncher();
       expect(deps.isAlive(pid)).toBe(true);
       expect(deps.commandLine(pid)!.split("\n").sort()).toEqual(
-        [`/bin/sh ${settings.qmdPath} mcp --http --port ${port}`, "sleep 300"].sort(),
+        [
+          `/bin/sh ${settings.qmdPath} mcp --http --port ${port}`,
+          "sleep 300",
+        ].sort(),
       );
     });
 
@@ -276,7 +329,8 @@ describe("server-deps", () => {
     it("killGroup signals only the group of a PID that is an integer above 1", () => {
       const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
       try {
-        for (const pid of [0, 1, -3, 1.5, Number.NaN]) deps.killGroup(pid, "SIGTERM");
+        for (const pid of [0, 1, -3, 1.5, Number.NaN])
+          deps.killGroup(pid, "SIGTERM");
         expect(kill).not.toHaveBeenCalled();
         deps.killGroup(4242, "SIGTERM");
         expect(kill.mock.calls).toEqual([[-4242, "SIGTERM"]]);
@@ -299,14 +353,20 @@ describe("server-deps", () => {
       writeFileSync(settings.qmdPath, "#!/bin/sh\n");
       const notExecutable = spawnServer();
       expect(notExecutable.pid).toBeUndefined();
-      expect(await notExecutable.exit).toEqual({ code: null, errorCode: "EACCES" });
+      expect(await notExecutable.exit).toEqual({
+        code: null,
+        errorCode: "EACCES",
+      });
     });
 
     it("reports a spawn that throws through exit", async () => {
       settings.qmdPath = "";
       const result = spawnServer();
       expect(result.pid).toBeUndefined();
-      expect(await result.exit).toEqual({ code: null, errorCode: "ERR_INVALID_ARG_VALUE" });
+      expect(await result.exit).toEqual({
+        code: null,
+        errorCode: "ERR_INVALID_ARG_VALUE",
+      });
     });
 
     it("spawns nothing when the log cannot be opened, and does not blame qmd", async () => {
@@ -359,12 +419,12 @@ describe("server-deps", () => {
       expect(deps.loadRecord()).toBeNull();
     });
 
-    it.each([
-      [{ pid: 2, port: 1 }],
-      [{ pid: 4242, port: 65_535 }],
-    ])("loads %j, at the edge of what is valid", (stored) => {
-      store.set(SERVER_RECORD_KEY, stored);
-      expect(deps.loadRecord()).toEqual(stored);
-    });
+    it.each([[{ pid: 2, port: 1 }], [{ pid: 4242, port: 65_535 }]])(
+      "loads %j, at the edge of what is valid",
+      (stored) => {
+        store.set(SERVER_RECORD_KEY, stored);
+        expect(deps.loadRecord()).toEqual(stored);
+      },
+    );
   });
 });

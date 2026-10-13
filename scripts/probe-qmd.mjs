@@ -20,9 +20,18 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const QMD = process.env.QMD_BIN ?? "qmd";
-const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures");
+const FIXTURES = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "tests",
+  "fixtures",
+);
 const COLLECTION = "probe";
-const QUERY_ARGS = { query: "sourdough starter hydration", collections: [COLLECTION], limit: 5 };
+const QUERY_ARGS = {
+  query: "sourdough starter hydration",
+  collections: [COLLECTION],
+  limit: 5,
+};
 const QUERY_TOP_FILE = `${COLLECTION}/HTML & markup.md`;
 const FRESH_PHRASE = "quokka enclosure maintenance";
 
@@ -42,7 +51,10 @@ const SHAPES = [
     },
     meta: {
       "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientInfo": { name: "qmd-search", version: "0.1.0" },
+      "io.modelcontextprotocol/clientInfo": {
+        name: "qmd-search",
+        version: "0.1.0",
+      },
       "io.modelcontextprotocol/clientCapabilities": {},
     },
   },
@@ -89,7 +101,12 @@ function start(args) {
   log(`$ qmd ${args.join(" ")}`);
   // cwd is the temp directory because qmd prefers a project-local
   // .qmd/index.yml found at or above its cwd over INDEX_PATH.
-  const child = spawn(QMD, args, { cwd: tmp, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(QMD, args, {
+    cwd: tmp,
+    env,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let output = "";
   for (const stream of [child.stdout, child.stderr]) {
     stream.setEncoding("utf8");
@@ -114,9 +131,13 @@ async function run(args, { allowFailure = false } = {}) {
   const startedAt = Date.now();
   const result = await start(args).exited;
   const ms = Date.now() - startedAt;
-  log(`exit ${result.code ?? result.signal} after ${ms} ms: qmd ${args.join(" ")}`);
+  log(
+    `exit ${result.code ?? result.signal} after ${ms} ms: qmd ${args.join(" ")}`,
+  );
   if (result.code !== 0 && !allowFailure) {
-    throw new Error(`qmd ${args.join(" ")} exited with ${result.code ?? result.signal}`);
+    throw new Error(
+      `qmd ${args.join(" ")} exited with ${result.code ?? result.signal}`,
+    );
   }
   return { ...result, ms };
 }
@@ -161,17 +182,33 @@ function freePort() {
 function request(port, { method, path, headers = {}, body, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "localhost", port, method, path, headers, agent: false, timeout: timeoutMs },
+      {
+        host: "localhost",
+        port,
+        method,
+        path,
+        headers,
+        agent: false,
+        timeout: timeoutMs,
+      },
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
         res.on("error", reject);
         res.on("end", () =>
-          resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString("utf8") }),
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            text: Buffer.concat(chunks).toString("utf8"),
+          }),
         );
       },
     );
-    req.on("timeout", () => req.destroy(new Error(`${method} ${path} timed out after ${timeoutMs} ms`)));
+    req.on("timeout", () =>
+      req.destroy(
+        new Error(`${method} ${path} timed out after ${timeoutMs} ms`),
+      ),
+    );
     req.on("error", reject);
     req.end(body);
   });
@@ -182,9 +219,16 @@ async function waitForHealth(port, server) {
   server.exited.then((result) => (exit = result));
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    if (exit) throw new Error(`qmd mcp exited with ${exit.code ?? exit.signal} before it was healthy`);
+    if (exit)
+      throw new Error(
+        `qmd mcp exited with ${exit.code ?? exit.signal} before it was healthy`,
+      );
     try {
-      const res = await request(port, { method: "GET", path: "/health", timeoutMs: 2_000 });
+      const res = await request(port, {
+        method: "GET",
+        path: "/health",
+        timeoutMs: 2_000,
+      });
       if (JSON.parse(res.text).status === "ok") return;
     } catch {
       // Not listening yet.
@@ -198,7 +242,10 @@ async function waitForHealth(port, server) {
 function toolCall(shape, args) {
   const params = { name: "query", arguments: args };
   if (shape.meta) params._meta = shape.meta;
-  return { headers: shape.headers, body: { jsonrpc: "2.0", id: 1, method: "tools/call", params } };
+  return {
+    headers: shape.headers,
+    body: { jsonrpc: "2.0", id: 1, method: "tools/call", params },
+  };
 }
 
 /** POST a tool call to /mcp. `json` is the parsed response body, or undefined if it is not JSON. */
@@ -220,10 +267,12 @@ async function postMcp(port, { headers, body }) {
   return { ...res, json };
 }
 
-const summarize = (res) => `HTTP ${res.status} (${res.headers["content-type"]}) ${res.text.slice(0, 600)}`;
+const summarize = (res) =>
+  `HTTP ${res.status} (${res.headers["content-type"]}) ${res.text.slice(0, 600)}`;
 
 const writeFixture = (name, text) => writeFile(join(FIXTURES, name), text);
-const writeJsonFixture = (name, value) => writeFixture(name, `${JSON.stringify(value, null, 2)}\n`);
+const writeJsonFixture = (name, value) =>
+  writeFixture(name, `${JSON.stringify(value, null, 2)}\n`);
 
 // ---------------------------------------------------------------------------
 // The probe
@@ -238,9 +287,13 @@ async function main() {
 
   const show = await run(["collection", "show", COLLECTION]);
   await writeFixture("collection-show.txt", show.output);
-  const showMissing = await run(["collection", "show", "nosuch"], { allowFailure: true });
+  const showMissing = await run(["collection", "show", "nosuch"], {
+    allowFailure: true,
+  });
   await writeFixture("collection-show-missing.txt", showMissing.output);
-  log(`collection show ${COLLECTION}: exit ${show.code}; collection show nosuch: exit ${showMissing.code}`);
+  log(
+    `collection show ${COLLECTION}: exit ${show.code}; collection show nosuch: exit ${showMissing.code}`,
+  );
 
   // 2. The server.
   const port = await freePort();
@@ -260,39 +313,55 @@ async function main() {
       break;
     }
   }
-  if (!working) throw new Error("mcp: neither shape A nor shape B returned result.structuredContent.results");
+  if (!working)
+    throw new Error(
+      "mcp: neither shape A nor shape B returned result.structuredContent.results",
+    );
   console.log(`mcp: shape ${working.shape.name} works`);
 
   const toolError = await postMcp(port, toolCall(working.shape, {}));
   log(`tool error: ${summarize(toolError)}`);
-  if (toolError.json === undefined) throw new Error("mcp: the response to empty arguments is not JSON");
+  if (toolError.json === undefined)
+    throw new Error("mcp: the response to empty arguments is not JSON");
 
   await writeJsonFixture("mcp-query-request.json", working.request);
   await writeJsonFixture("mcp-query-response.json", working.response);
   await writeJsonFixture("mcp-tool-error-response.json", toolError.json);
 
   const search = async (query) => {
-    const res = await postMcp(port, toolCall(working.shape, { ...QUERY_ARGS, query }));
+    const res = await postMcp(
+      port,
+      toolCall(working.shape, { ...QUERY_ARGS, query }),
+    );
     const results = res.json?.result?.structuredContent?.results;
-    if (!Array.isArray(results)) throw new Error(`query "${query}" failed: ${summarize(res)}`);
+    if (!Array.isArray(results))
+      throw new Error(`query "${query}" failed: ${summarize(res)}`);
     return results;
   };
-  const files = (results) => JSON.stringify(results.map((result) => result.file));
+  const files = (results) =>
+    JSON.stringify(results.map((result) => result.file));
 
   // 4. Experiment 3: the running server sees a note indexed after it started.
-  await writeFile(join(vault, "Fresh note.md"), `Checklist for ${FRESH_PHRASE}: walk the fence line, then refill the water trough.\n`);
+  await writeFile(
+    join(vault, "Fresh note.md"),
+    `Checklist for ${FRESH_PHRASE}: walk the fence line, then refill the water trough.\n`,
+  );
   await run(["update"]);
   await run(["embed", "-c", COLLECTION]);
   const fresh = await search(FRESH_PHRASE);
   if (fresh[0]?.file !== `${COLLECTION}/Fresh note.md`) {
-    throw new Error(`freshness: expected ${COLLECTION}/Fresh note.md first, got ${files(fresh)}`);
+    throw new Error(
+      `freshness: expected ${COLLECTION}/Fresh note.md first, got ${files(fresh)}`,
+    );
   }
   console.log("freshness: ok");
 
   // 5. Experiment 4: `qmd embed` with nothing to embed.
   const idle = await run(["embed", "-c", COLLECTION]);
   if (!idle.output.includes("already have embeddings")) {
-    throw new Error(`embed idle: the embed was not idle: ${idle.output.trim()}`);
+    throw new Error(
+      `embed idle: the embed was not idle: ${idle.output.trim()}`,
+    );
   }
   console.log(`embed idle: ${idle.ms} ms`);
 
@@ -301,14 +370,21 @@ async function main() {
   await sleep(1_000);
   const killed = await stopGroup(forced);
   log(`interrupted embed ended with ${killed.code ?? killed.signal}`);
-  if (killed.code === 0) throw new Error("interrupt: embed -f finished before it could be interrupted");
+  if (killed.code === 0)
+    throw new Error(
+      "interrupt: embed -f finished before it could be interrupted",
+    );
   const redone = await run(["embed", "-c", COLLECTION]);
   if (!redone.output.includes("Done!")) {
-    throw new Error(`interrupt: the next embed had nothing to redo or did not finish: ${redone.output.trim()}`);
+    throw new Error(
+      `interrupt: the next embed had nothing to redo or did not finish: ${redone.output.trim()}`,
+    );
   }
   const after = await search(QUERY_ARGS.query);
   if (after[0]?.file !== QUERY_TOP_FILE) {
-    throw new Error(`interrupt: expected ${QUERY_TOP_FILE} first, got ${files(after)}`);
+    throw new Error(
+      `interrupt: expected ${QUERY_TOP_FILE} first, got ${files(after)}`,
+    );
   }
   console.log("interrupt: ok");
 }

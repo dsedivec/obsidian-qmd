@@ -24,11 +24,16 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 export class QmdCli {
   private readonly running = new Set<ChildProcess>();
 
-  constructor(private readonly getConfig: () => { qmdPath: string; extraPath: string }) {}
+  constructor(
+    private readonly getConfig: () => { qmdPath: string; extraPath: string },
+  ) {}
 
   env(): NodeJS.ProcessEnv {
     const { qmdPath, extraPath } = this.getConfig();
-    return { ...process.env, PATH: buildPath(qmdPath, extraPath, process.env.PATH) };
+    return {
+      ...process.env,
+      PATH: buildPath(qmdPath, extraPath, process.env.PATH),
+    };
   }
 
   run(args: string[], opts: { timeoutMs: number }): Promise<CliResult> {
@@ -50,7 +55,13 @@ export class QmdCli {
         });
       } catch (e) {
         const code = (e as NodeJS.ErrnoException | undefined)?.code;
-        resolve({ code: null, stdout: "", stderr: "", timedOut: false, errorCode: typeof code === "string" ? code : "ECONFIG" });
+        resolve({
+          code: null,
+          stdout: "",
+          stderr: "",
+          timedOut: false,
+          errorCode: typeof code === "string" ? code : "ECONFIG",
+        });
         return;
       }
       this.running.add(child);
@@ -62,7 +73,13 @@ export class QmdCli {
         clearTimeout(killTimer);
         clearTimeout(settleTimer);
         this.running.delete(child);
-        resolve({ code, stdout, stderr, timedOut, ...(errorCode ? { errorCode } : {}) });
+        resolve({
+          code,
+          stdout,
+          stderr,
+          timedOut,
+          ...(errorCode ? { errorCode } : {}),
+        });
       };
 
       const timer = setTimeout(() => {
@@ -74,8 +91,12 @@ export class QmdCli {
         }, KILL_GRACE_MS);
       }, opts.timeoutMs);
 
-      child.stdout?.setEncoding("utf8").on("data", (d: string) => (stdout += d));
-      child.stderr?.setEncoding("utf8").on("data", (d: string) => (stderr += d));
+      child.stdout
+        ?.setEncoding("utf8")
+        .on("data", (d: string) => (stdout += d));
+      child.stderr
+        ?.setEncoding("utf8")
+        .on("data", (d: string) => (stderr += d));
       child.on("error", (e: NodeJS.ErrnoException) => {
         errorCode = e.code;
         finish(null);

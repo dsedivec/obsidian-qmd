@@ -8,7 +8,10 @@ export type IndexState =
 
 export interface IndexerDeps {
   cli: { run(args: string[], opts: { timeoutMs: number }): Promise<CliResult> };
-  getSettings: () => Pick<QmdSearchSettings, "collectionName" | "reindexQuietMinutes" | "qmdPath">;
+  getSettings: () => Pick<
+    QmdSearchSettings,
+    "collectionName" | "reindexQuietMinutes" | "qmdPath"
+  >;
   vaultPath: string;
   realpath: (path: string) => string;
   now: () => number;
@@ -25,10 +28,15 @@ const ADD_TIMEOUT_MS = 10 * MINUTE_MS;
 const UPDATE_TIMEOUT_MS = 10 * MINUTE_MS;
 const EMBED_TIMEOUT_MS = 30 * MINUTE_MS;
 
-const pointsElsewhere = (name: string): string => `collection "${name}" points at another folder`;
+const pointsElsewhere = (name: string): string =>
+  `collection "${name}" points at another folder`;
 
 function lastNonEmptyLine(text: string): string | undefined {
-  return text.split("\n").map((line) => line.trim()).filter((line) => line !== "").pop();
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .pop();
 }
 
 function messageOf(error: unknown): string {
@@ -173,7 +181,10 @@ export class Indexer {
       if (found !== "here") this.ready = false;
       if (found === "elsewhere") throw new Error(pointsElsewhere(name));
       if (found === "missing") {
-        await this.qmd(["collection", "add", this.deps.vaultPath, "--name", name], ADD_TIMEOUT_MS);
+        await this.qmd(
+          ["collection", "add", this.deps.vaultPath, "--name", name],
+          ADD_TIMEOUT_MS,
+        );
         if (renamed()) return;
       }
       enter("update");
@@ -200,12 +211,18 @@ export class Indexer {
     const args = ["collection", "show", name];
     const result = await this.exec(args, SHOW_TIMEOUT_MS);
     const exitedNonZero = result.code !== null && result.code !== 0;
-    if (exitedNonZero && `${result.stdout}\n${result.stderr}`.includes("Collection not found")) return "missing";
+    if (
+      exitedNonZero &&
+      `${result.stdout}\n${result.stderr}`.includes("Collection not found")
+    )
+      return "missing";
     this.assertSucceeded(args, result);
     const path = /^\s*Path:\s*(.+)$/m.exec(result.stdout)?.[1];
     // Without a path there is no proof that the collection is this vault's.
     if (path === undefined) return "elsewhere";
-    return this.resolved(path) === this.resolved(this.deps.vaultPath) ? "here" : "elsewhere";
+    return this.resolved(path) === this.resolved(this.deps.vaultPath)
+      ? "here"
+      : "elsewhere";
   }
 
   /** Runs one command that has to succeed; throws the message to show when it does not. */
@@ -221,12 +238,19 @@ export class Indexer {
   private assertSucceeded(args: string[], result: CliResult): void {
     const command = `qmd ${args.join(" ")}`;
     if (result.errorCode === "ENOENT" || result.errorCode === "EACCES") {
-      throw new Error(`Couldn't run qmd at "${this.deps.getSettings().qmdPath}".`);
+      throw new Error(
+        `Couldn't run qmd at "${this.deps.getSettings().qmdPath}".`,
+      );
     }
     if (result.timedOut) throw new Error(`${command} timed out`);
     if (result.code !== 0) {
-      const exit = result.code === null ? "killed before it finished" : `exit code ${result.code}`;
-      throw new Error(`${command} failed: ${lastNonEmptyLine(result.stderr) ?? exit}`);
+      const exit =
+        result.code === null
+          ? "killed before it finished"
+          : `exit code ${result.code}`;
+      throw new Error(
+        `${command} failed: ${lastNonEmptyLine(result.stderr) ?? exit}`,
+      );
     }
   }
 

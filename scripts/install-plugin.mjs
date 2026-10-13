@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 const MAIN_VAULT = "/Users/alex/Documents/Obsidian/Main";
 const PLUGIN_ID = "qmd-search";
 const FILES = ["main.js", "manifest.json", "styles.css"];
-const USAGE = "Usage: node scripts/install-plugin.mjs <vault path> [--allow-main]";
+const USAGE =
+  "Usage: node scripts/install-plugin.mjs <vault path> [--allow-main]";
 
 function fail(message) {
   console.error(message);
@@ -22,8 +23,15 @@ function isDirectory(path) {
 
 /** True when both paths name one directory, whatever symlink or letter case they were written with. */
 function sameDirectory(a, b) {
-  const [statA, statB] = [a, b].map((path) => statSync(path, { throwIfNoEntry: false }));
-  return statA !== undefined && statB !== undefined && statA.dev === statB.dev && statA.ino === statB.ino;
+  const [statA, statB] = [a, b].map((path) =>
+    statSync(path, { throwIfNoEntry: false }),
+  );
+  return (
+    statA !== undefined &&
+    statB !== undefined &&
+    statA.dev === statB.dev &&
+    statA.ino === statB.ino
+  );
 }
 
 const args = process.argv.slice(2);
@@ -34,8 +42,13 @@ if (unknown !== undefined) fail(`Unknown option ${unknown}\n${USAGE}`);
 if (paths.length !== 1) fail(USAGE);
 
 const vault = resolve(paths[0]);
-if ((vault === MAIN_VAULT || sameDirectory(vault, MAIN_VAULT)) && !options.includes("--allow-main")) {
-  fail(`Refusing to install into the Main vault (${MAIN_VAULT}) without --allow-main.`);
+if (
+  (vault === MAIN_VAULT || sameDirectory(vault, MAIN_VAULT)) &&
+  !options.includes("--allow-main")
+) {
+  fail(
+    `Refusing to install into the Main vault (${MAIN_VAULT}) without --allow-main.`,
+  );
 }
 if (!isDirectory(join(vault, ".obsidian"))) {
   fail(`${vault} is not an Obsidian vault: it has no .obsidian folder.`);
@@ -43,7 +56,8 @@ if (!isDirectory(join(vault, ".obsidian"))) {
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const missing = FILES.filter((file) => !existsSync(join(root, file)));
-if (missing.length > 0) fail(`Missing ${missing.join(", ")} in ${root}. Run "npm run build" first.`);
+if (missing.length > 0)
+  fail(`Missing ${missing.join(", ")} in ${root}. Run "npm run build" first.`);
 
 const target = join(vault, ".obsidian", "plugins", PLUGIN_ID);
 mkdirSync(target, { recursive: true });

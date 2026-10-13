@@ -2,7 +2,8 @@ import type { SearchResult } from "./results";
 import { scorePercent } from "./view-model";
 
 export const CLI_COMMAND = "qmd-search";
-export const CLI_DESCRIPTION = "Search this vault with QMD (hybrid search with reranking)";
+export const CLI_DESCRIPTION =
+  "Search this vault with QMD (hybrid search with reranking)";
 export const CLI_FLAGS = {
   query: { value: "<text>", description: "Search text", required: true },
   limit: { value: "<n>", description: "Maximum results, 1 to 50" },
@@ -14,7 +15,9 @@ const LIMIT_ERROR = "limit must be a whole number from 1 to 50";
 export function formatCliText(results: SearchResult[]): string {
   if (results.length === 0) return "No results.";
   return results
-    .map((r) => `${r.path}:${r.line}  (${scorePercent(r.score)})\n  ${r.snippet}`)
+    .map(
+      (r) => `${r.path}:${r.line}  (${scorePercent(r.score)})\n  ${r.snippet}`,
+    )
     .join("\n\n");
 }
 
@@ -42,7 +45,9 @@ export function createCliHandler(deps: {
     }
     try {
       const results = await deps.search(query, limit);
-      return params.json === "true" ? JSON.stringify(results, null, 2) : formatCliText(results);
+      return params.json === "true"
+        ? JSON.stringify(results, null, 2)
+        : formatCliText(results);
     } catch (err) {
       return `Error: ${deps.describe(err)}`;
     }

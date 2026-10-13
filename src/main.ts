@@ -1,7 +1,24 @@
 import { realpathSync } from "node:fs";
-import { Notice, Plugin, TFile, type FileSystemAdapter, type PaneType, type TAbstractFile } from "obsidian";
-import { CLI_COMMAND, CLI_DESCRIPTION, CLI_FLAGS, createCliHandler } from "./cli-handler";
-import { isValidCollectionName, sanitizeSettings, type KeyValueStore, type QmdSearchSettings } from "./config";
+import {
+  Notice,
+  Plugin,
+  TFile,
+  type FileSystemAdapter,
+  type PaneType,
+  type TAbstractFile,
+} from "obsidian";
+import {
+  CLI_COMMAND,
+  CLI_DESCRIPTION,
+  CLI_FLAGS,
+  createCliHandler,
+} from "./cli-handler";
+import {
+  isValidCollectionName,
+  sanitizeSettings,
+  type KeyValueStore,
+  type QmdSearchSettings,
+} from "./config";
 import { describeError, type ErrorView } from "./errors";
 import { createExclusionCheck } from "./exclusions";
 import { Indexer } from "./indexer";
@@ -41,13 +58,18 @@ export default class QmdSearchPlugin extends Plugin {
   indexer!: Indexer;
   search!: SearchService;
   /** The last search, kept here so that it outlives the pane. */
-  session: { query: string; results: SearchResult[] | null; error: unknown } = { query: "", results: null, error: null };
+  session: { query: string; results: SearchResult[] | null; error: unknown } = {
+    query: "",
+    results: null,
+    error: null,
+  };
   private stopped = false;
 
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
     this.settings = sanitizeSettings(saved, this.app.vault.getName());
-    if (JSON.stringify(saved) !== JSON.stringify(this.settings)) await this.saveData(this.settings);
+    if (JSON.stringify(saved) !== JSON.stringify(this.settings))
+      await this.saveData(this.settings);
     // The plugin can unload while the settings load or save. Nothing registered after that would
     // ever be removed again, and a CLI command left registered makes the next load throw.
     if (this.stopped) return;
@@ -58,7 +80,9 @@ export default class QmdSearchPlugin extends Plugin {
       set: (key, value) => this.app.saveLocalStorage(key, value),
     };
     this.cli = new QmdCli(getSettings);
-    this.server = new ServerManager(createServerDeps({ cli: this.cli, getSettings, store }));
+    this.server = new ServerManager(
+      createServerDeps({ cli: this.cli, getSettings, store }),
+    );
     this.indexer = new Indexer({
       cli: this.cli,
       getSettings,
@@ -71,15 +95,24 @@ export default class QmdSearchPlugin extends Plugin {
       server: this.server,
       client: new QmdClient(() => this.settings.port),
       getSettings,
-      fileExists: (path) => this.app.vault.getAbstractFileByPath(path) instanceof TFile,
+      fileExists: (path) =>
+        this.app.vault.getAbstractFileByPath(path) instanceof TFile,
       isExcluded: createExclusionCheck(this.app),
     });
 
     this.addSettingTab(new QmdSearchSettingTab(this.app, this));
     // Registered once the units exist: a pane left open is rebuilt at once, and reads them.
     this.registerView(VIEW_TYPE, (leaf) => new SearchView(leaf, this));
-    this.addCommand({ id: "search", name: "Search", callback: () => this.activateView() });
-    this.addCommand({ id: "reindex", name: "Reindex vault now", callback: () => this.reindex() });
+    this.addCommand({
+      id: "search",
+      name: "Search",
+      callback: () => this.activateView(),
+    });
+    this.addCommand({
+      id: "reindex",
+      name: "Reindex vault now",
+      callback: () => this.reindex(),
+    });
     this.registerCliHandler(
       CLI_COMMAND,
       CLI_DESCRIPTION,
@@ -101,7 +134,10 @@ export default class QmdSearchPlugin extends Plugin {
         await this.server.adoptIfOurs();
       } catch (err) {
         // Indexing must still start: a search waits for the indexer's first check.
-        console.error("QMD Search: could not check for a QMD server left running", err);
+        console.error(
+          "QMD Search: could not check for a QMD server left running",
+          err,
+        );
       }
       // The plugin can unload before the layout is ready, or while the check above waits.
       if (this.stopped) return;
@@ -130,19 +166,29 @@ export default class QmdSearchPlugin extends Plugin {
     // A collection name that is not valid is refused and the name in use is kept. Sanitising it
     // would put the name derived from the vault in its place, and the indexer would then create
     // that collection: a typo must not leave behind a collection that the plugin never removes.
-    const typed = typeof patch.collectionName === "string" ? patch.collectionName.trim() : "";
-    const collectionName = isValidCollectionName(typed) ? typed : before.collectionName;
-    const after = sanitizeSettings({ ...before, ...patch, collectionName }, this.app.vault.getName());
+    const typed =
+      typeof patch.collectionName === "string"
+        ? patch.collectionName.trim()
+        : "";
+    const collectionName = isValidCollectionName(typed)
+      ? typed
+      : before.collectionName;
+    const after = sanitizeSettings(
+      { ...before, ...patch, collectionName },
+      this.app.vault.getName(),
+    );
     this.settings = after;
     // Acted on before the save is awaited, so that no search can start a server from the new
     // settings in between and have it stopped here.
-    const qmdCommandChanged = after.qmdPath !== before.qmdPath || after.extraPath !== before.extraPath;
+    const qmdCommandChanged =
+      after.qmdPath !== before.qmdPath || after.extraPath !== before.extraPath;
     if (after.port !== before.port || qmdCommandChanged) {
       attempt("stop the QMD server", () => this.server.stopIfOwned());
     }
     // The indexer repeats its check once, whichever of these changed: the collection it looks
     // for, or the qmd it runs to look. A failure to run qmd must not outlast the wrong path.
-    if (after.collectionName !== before.collectionName || qmdCommandChanged) void this.indexer.start();
+    if (after.collectionName !== before.collectionName || qmdCommandChanged)
+      void this.indexer.start();
     await this.saveData(after);
   }
 
@@ -167,21 +213,26 @@ export default class QmdSearchPlugin extends Plugin {
   }
 
   /** Opens the note at the result's line. `focus` false leaves the keyboard where it is. */
-  async openResult(result: SearchResult, opts: { newLeaf: PaneType | boolean; focus: boolean }): Promise<void> {
+  async openResult(
+    result: SearchResult,
+    opts: { newLeaf: PaneType | boolean; focus: boolean },
+  ): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(result.path);
     if (!(file instanceof TFile)) {
       new Notice("QMD: " + result.path + " no longer exists.");
       return;
     }
-    await this.app.workspace
-      .getLeaf(opts.newLeaf)
-      .openFile(file, { active: opts.focus, eState: { line: result.line - 1 } });
+    await this.app.workspace.getLeaf(opts.newLeaf).openFile(file, {
+      active: opts.focus,
+      eState: { line: result.line - 1 },
+    });
   }
 
   private async reindex(): Promise<void> {
     await this.indexer.runNow();
     const state = this.indexer.getState();
-    if (state.kind === "failed") new Notice(`QMD: index failed: ${state.message}`);
+    if (state.kind === "failed")
+      new Notice(`QMD: index failed: ${state.message}`);
     // Still `running` means the run was cut off by the plugin unloading: nothing was reindexed.
     else if (state.kind === "idle") new Notice("QMD: vault reindexed.");
   }

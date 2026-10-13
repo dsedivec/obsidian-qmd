@@ -15,19 +15,36 @@ const alive = (pid: number): boolean => {
     return false;
   }
 };
-const cli = (qmdPath = FAKE, extraPath = "") => new QmdCli(() => ({ qmdPath, extraPath }));
+const cli = (qmdPath = FAKE, extraPath = "") =>
+  new QmdCli(() => ({ qmdPath, extraPath }));
 
 describe("QmdCli", () => {
   it("captures output and exit code", async () => {
-    expect(await cli().run(["echo", "a b", "c"], T)).toMatchObject({ code: 0, stdout: "out:a b c\n", stderr: "err:a b c\n", timedOut: false });
-    expect(await cli().run(["fail"], T)).toMatchObject({ code: 3, stderr: "boom\n" });
+    expect(await cli().run(["echo", "a b", "c"], T)).toMatchObject({
+      code: 0,
+      stdout: "out:a b c\n",
+      stderr: "err:a b c\n",
+      timedOut: false,
+    });
+    expect(await cli().run(["fail"], T)).toMatchObject({
+      code: 3,
+      stderr: "boom\n",
+    });
   });
   it("reports a missing binary instead of rejecting", async () => {
-    expect(await cli("/nonexistent/qmd").run(["echo"], T)).toMatchObject({ code: null, errorCode: "ENOENT" });
+    expect(await cli("/nonexistent/qmd").run(["echo"], T)).toMatchObject({
+      code: null,
+      errorCode: "ENOENT",
+    });
   });
   it("puts qmd's directory and the extra directories first on PATH", async () => {
-    const { stdout } = await cli(FAKE, "/extra/one:/extra/two").run(["path"], T);
-    expect(stdout.startsWith(`${dirname(FAKE)}:/extra/one:/extra/two:`)).toBe(true);
+    const { stdout } = await cli(FAKE, "/extra/one:/extra/two").run(
+      ["path"],
+      T,
+    );
+    expect(stdout.startsWith(`${dirname(FAKE)}:/extra/one:/extra/two:`)).toBe(
+      true,
+    );
   });
   it("runs a qmd whose path contains a space", async () => {
     const dir = mkdtempSync(join(tmpdir(), "has space "));
@@ -55,18 +72,35 @@ describe("QmdCli", () => {
     expect((await pending).code).toBeNull();
   });
   it("resolves instead of rejecting when spawn throws", async () => {
-    expect(await cli("").run(["echo"], T)).toMatchObject({ code: null, stdout: "", stderr: "", timedOut: false, errorCode: "ERR_INVALID_ARG_VALUE" });
-    expect(await cli().run(["echo", "a\0b"], T)).toMatchObject({ code: null, timedOut: false, errorCode: "ERR_INVALID_ARG_VALUE" });
+    expect(await cli("").run(["echo"], T)).toMatchObject({
+      code: null,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+      errorCode: "ERR_INVALID_ARG_VALUE",
+    });
+    expect(await cli().run(["echo", "a\0b"], T)).toMatchObject({
+      code: null,
+      timedOut: false,
+      errorCode: "ERR_INVALID_ARG_VALUE",
+    });
   });
   it("resolves instead of rejecting when getConfig throws", async () => {
     const plain = new QmdCli(() => {
       throw new Error("bad config");
     });
-    expect(await plain.run(["echo"], T)).toMatchObject({ code: null, timedOut: false, errorCode: "ECONFIG" });
+    expect(await plain.run(["echo"], T)).toMatchObject({
+      code: null,
+      timedOut: false,
+      errorCode: "ECONFIG",
+    });
     const coded = new QmdCli(() => {
       throw Object.assign(new Error("x"), { code: "EWHATEVER" });
     });
-    expect(await coded.run(["echo"], T)).toMatchObject({ code: null, errorCode: "EWHATEVER" });
+    expect(await coded.run(["echo"], T)).toMatchObject({
+      code: null,
+      errorCode: "EWHATEVER",
+    });
   });
   it("settles after a timeout even when a grandchild ignoring SIGTERM holds the pipes", async () => {
     const result = await cli().run(["stubborn"], { timeoutMs: 300 });

@@ -2,13 +2,30 @@
 // starts every process from an argument array and runs no shell; these tests fail if that changes.
 // A string that could run a command would create the sentinel file, which nothing else ever does.
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import {
   DEFAULT_SETTINGS,
   deriveCollectionName,
@@ -51,10 +68,17 @@ let strings: string[];
 let hostileDir: string;
 
 const expectNoSentinel = (): void =>
-  expect(existsSync(sentinel), "a shell ran the text as a command, which created the sentinel").toBe(false);
+  expect(
+    existsSync(sentinel),
+    "a shell ran the text as a command, which created the sentinel",
+  ).toBe(false);
 
 /** The fake's report of these arguments: their number, then each one, all ending in a NUL. */
-const report = (...args: string[]): string[] => [String(args.length), ...args, ""];
+const report = (...args: string[]): string[] => [
+  String(args.length),
+  ...args,
+  "",
+];
 
 beforeAll(() => {
   tmp = mkdtempSync(join(tmpdir(), "qmd-search-hostile-"));
@@ -76,15 +100,19 @@ afterEach(() => rmSync(sentinel, { force: true }));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 describe("QmdCli", () => {
-  const cli = (qmdPath = FAKE, extraPath = "") => new QmdCli(() => ({ qmdPath, extraPath }));
+  const cli = (qmdPath = FAKE, extraPath = "") =>
+    new QmdCli(() => ({ qmdPath, extraPath }));
 
-  it.each(CASES)("passes %j to qmd as one argument, byte for byte", async (_name, index) => {
-    const text = strings[index];
-    const result = await cli().run(["args", text], T);
-    expectNoSentinel();
-    expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
-    expect(result.stdout.split("\0")).toEqual(report(text));
-  });
+  it.each(CASES)(
+    "passes %j to qmd as one argument, byte for byte",
+    async (_name, index) => {
+      const text = strings[index];
+      const result = await cli().run(["args", text], T);
+      expectNoSentinel();
+      expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
+      expect(result.stdout.split("\0")).toEqual(report(text));
+    },
+  );
 
   it("passes every hostile string in one call, each as its own argument", async () => {
     const result = await cli().run(["args", ...strings], T);
@@ -104,7 +132,10 @@ describe("QmdCli", () => {
     const result = await cli(FAKE, hostileDir).run(["path"], T);
     expectNoSentinel();
     expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
-    expect(result.stdout.split(":").slice(0, 2)).toEqual([dirname(FAKE), hostileDir]);
+    expect(result.stdout.split(":").slice(0, 2)).toEqual([
+      dirname(FAKE),
+      hostileDir,
+    ]);
   });
 });
 
@@ -116,18 +147,33 @@ describe("createServerDeps", () => {
     await new Promise<void>((done) => held.listen(0, "localhost", done));
     const { port } = held.address() as net.AddressInfo;
     const qmdPath = join(hostileDir, "qmd");
-    const settings: QmdSearchSettings = { ...DEFAULT_SETTINGS, qmdPath, extraPath: hostileDir, port };
+    const settings: QmdSearchSettings = {
+      ...DEFAULT_SETTINGS,
+      qmdPath,
+      extraPath: hostileDir,
+      port,
+    };
     const store: KeyValueStore = { get: () => undefined, set: () => {} };
-    const deps = createServerDeps({ cli: new QmdCli(() => settings), getSettings: () => settings, store });
+    const deps = createServerDeps({
+      cli: new QmdCli(() => settings),
+      getSettings: () => settings,
+      store,
+    });
 
     const server = deps.spawnServer(port);
     try {
       // The fake reports its arguments and exits. The timer only bounds a failure.
-      const exit = await Promise.race([server.exit, sleep(3000, "still running", { ref: false })]);
+      const exit = await Promise.race([
+        server.exit,
+        sleep(3000, "still running", { ref: false }),
+      ]);
       expectNoSentinel();
       // The log is the server's output: the fake names the path it was run by, then its arguments.
       const log = readFileSync(serverLogPath(port), "utf8").split("\0");
-      expect({ exit, log }).toEqual({ exit: { code: 0 }, log: [qmdPath, ...report("mcp", "--http", "--port", String(port))] });
+      expect({ exit, log }).toEqual({
+        exit: { code: 0 },
+        log: [qmdPath, ...report("mcp", "--http", "--port", String(port))],
+      });
     } finally {
       if (server.pid !== undefined) deps.killGroup(server.pid, "SIGKILL");
       await server.exit;
@@ -151,7 +197,13 @@ describe("QmdClient", () => {
       req.on("end", () => {
         bodies.push(body);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { structuredContent: { results: [] } } }));
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { structuredContent: { results: [] } },
+          }),
+        );
       });
     });
     await new Promise<void>((done) => server.listen(0, "localhost", done));
@@ -170,50 +222,85 @@ describe("QmdClient", () => {
 
   // The client does not check collection names. Whatever it is given has to travel as data too,
   // so each string is sent as the query beside its neighbour in the list as the collection.
-  it.each(CASES)("sends %j as the query, and another hostile string as the collection", async (_name, index) => {
-    const text = strings[index];
-    const collection = strings[(index + 1) % strings.length];
-    const outcome = await client.query(text, { collection, limit: 20 }).catch((error: unknown) => error);
-    expectNoSentinel();
-    expect(outcome).toEqual([]);
-    expect(bodies).toHaveLength(1);
-    const sent = JSON.parse(bodies[0]).params.arguments;
-    expect(sent.query).toBe(text);
-    expect(sent.collections).toEqual([collection]);
-  });
+  it.each(CASES)(
+    "sends %j as the query, and another hostile string as the collection",
+    async (_name, index) => {
+      const text = strings[index];
+      const collection = strings[(index + 1) % strings.length];
+      const outcome = await client
+        .query(text, { collection, limit: 20 })
+        .catch((error: unknown) => error);
+      expectNoSentinel();
+      expect(outcome).toEqual([]);
+      expect(bodies).toHaveLength(1);
+      const sent = JSON.parse(bodies[0]).params.arguments;
+      expect(sent.query).toBe(text);
+      expect(sent.collections).toEqual([collection]);
+    },
+  );
 });
 
 describe("SearchService", () => {
   // The service collapses each run of whitespace into one space and trims the ends. The only
   // whitespace in the list that this changes is the one newline, so every other string has to
   // arrive exactly as it was typed.
-  it.each(CASES)("hands %j to the client with nothing but its whitespace changed", async (_name, index) => {
-    const text = strings[index];
-    const query = vi.fn<QmdClient["query"]>(async () => []);
-    const service = new SearchService({
-      indexer: { whenReady: async () => true, getState: () => ({ kind: "idle" }) },
-      server: { ensureRunning: async () => {}, noteActivity: () => {}, hold: () => () => {} },
-      client: { query },
-      getSettings: () => ({ collectionName: "Main", resultCount: 3 }),
-      fileExists: () => true,
-      isExcluded: () => false,
-    });
-    await service.search(text);
-    expectNoSentinel();
-    expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0]).toBe(text.replaceAll("\n", " "));
-  });
+  it.each(CASES)(
+    "hands %j to the client with nothing but its whitespace changed",
+    async (_name, index) => {
+      const text = strings[index];
+      const query = vi.fn<QmdClient["query"]>(async () => []);
+      const service = new SearchService({
+        indexer: {
+          whenReady: async () => true,
+          getState: () => ({ kind: "idle" }),
+        },
+        server: {
+          ensureRunning: async () => {},
+          noteActivity: () => {},
+          hold: () => () => {},
+        },
+        client: { query },
+        getSettings: () => ({ collectionName: "Main", resultCount: 3 }),
+        fileExists: () => true,
+        isExcluded: () => false,
+      });
+      await service.search(text);
+      expectNoSentinel();
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls[0][0]).toBe(text.replaceAll("\n", " "));
+    },
+  );
 });
 
 describe("collection names", () => {
-  const BAD = ["a$b", "a`b", "a;b", "a b", "a|b", "a&b", "$(x)", "a/b", "a\nb", "-x", "a'b", 'a"b'];
+  const BAD = [
+    "a$b",
+    "a`b",
+    "a;b",
+    "a b",
+    "a|b",
+    "a&b",
+    "$(x)",
+    "a/b",
+    "a\nb",
+    "-x",
+    "a'b",
+    'a"b',
+  ];
 
-  it.each(BAD)("%j is refused, and the saved setting falls back to a name made from the vault's", (bad) => {
-    expect(isValidCollectionName(bad)).toBe(false);
-    expect(sanitizeSettings({ collectionName: bad }, "My Vault").collectionName).toBe("My-Vault");
-  });
+  it.each(BAD)(
+    "%j is refused, and the saved setting falls back to a name made from the vault's",
+    (bad) => {
+      expect(isValidCollectionName(bad)).toBe(false);
+      expect(
+        sanitizeSettings({ collectionName: bad }, "My Vault").collectionName,
+      ).toBe("My-Vault");
+    },
+  );
 
   it("makes a name of safe characters alone from a hostile vault name", () => {
-    expect(deriveCollectionName("We$ird `vault` (1); rm -rf")).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(deriveCollectionName("We$ird `vault` (1); rm -rf")).toMatch(
+      /^[A-Za-z0-9_-]+$/,
+    );
   });
 });

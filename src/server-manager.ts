@@ -1,13 +1,22 @@
 import { classifyStartFailure, QmdSearchError } from "./errors";
 
-export interface OwnedRecord { pid: number; port: number }
-export interface SpawnExit { code: number | null; errorCode?: string }
+export interface OwnedRecord {
+  pid: number;
+  port: number;
+}
+export interface SpawnExit {
+  code: number | null;
+  errorCode?: string;
+}
 /**
  * `pid` is the launcher, which leads the process group the server runs in; it is undefined when
  * the spawn itself failed. `exit` resolves when the launcher exits or could not be spawned, and
  * never rejects. The launcher exiting does not mean the group is gone: the server is its child.
  */
-export interface SpawnedServer { pid: number | undefined; exit: Promise<SpawnExit> }
+export interface SpawnedServer {
+  pid: number | undefined;
+  exit: Promise<SpawnExit>;
+}
 export interface ServerDeps {
   getSettings(): { port: number; idleTimeoutMinutes: number };
   /** Resolves true when a QMD server answers on the port, false otherwise. Never rejects. */
@@ -44,7 +53,11 @@ type Timer = ReturnType<typeof setTimeout>;
 type StatusListener = (status: "starting") => void;
 type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
 /** A process group this manager has sent SIGTERM: the port it served, and when it was signalled, by `performance.now()`. */
-interface StoppedGroup { pid: number; port: number; at: number }
+interface StoppedGroup {
+  pid: number;
+  port: number;
+  at: number;
+}
 
 /**
  * Makes sure a QMD server is reachable and stops only its own. It is there for two things: that
@@ -91,7 +104,11 @@ export class ServerManager {
   /** The running server this manager spawned or adopted. */
   private owned: OwnedRecord | null = null;
   /** The server this manager spawned that has not answered health yet and has not exited. */
-  private pending: { pid: number | undefined; port: number; abort(): void } | null = null;
+  private pending: {
+    pid: number | undefined;
+    port: number;
+    abort(): void;
+  } | null = null;
   /**
    * The groups this manager has sent SIGTERM and has not yet seen gone or given six seconds. In
    * memory only: what an earlier session stopped is not known here.
@@ -121,7 +138,8 @@ export class ServerManager {
 
   /** Resolves once a server answers. Concurrent calls share one attempt. */
   ensureRunning(onStatus?: StatusListener): Promise<void> {
-    if (this.disposed) return Promise.reject(new QmdSearchError("server-start", SHUT_DOWN));
+    if (this.disposed)
+      return Promise.reject(new QmdSearchError("server-start", SHUT_DOWN));
     if (!this.attempt) {
       const listeners: StatusListener[] = [];
       const attempt: Promise<void> = this.start(listeners).finally(() => {
@@ -142,7 +160,10 @@ export class ServerManager {
     clearTimeout(this.idleTimer);
     if (this.disposed || !this.owned || this.holds > 0) return;
     const { idleTimeoutMinutes } = this.deps.getSettings();
-    this.idleTimer = setTimeout(() => this.stopOwned(), idleTimeoutMinutes * 60_000);
+    this.idleTimer = setTimeout(
+      () => this.stopOwned(),
+      idleTimeoutMinutes * 60_000,
+    );
   }
 
   /**
@@ -178,7 +199,8 @@ export class ServerManager {
     this.pending = null;
     starting?.abort();
     // Returned by `spawnServer` and not yet exited, so this PID needs no identity check.
-    if (starting?.pid !== undefined) this.terminate(starting.pid, starting.port);
+    if (starting?.pid !== undefined)
+      this.terminate(starting.pid, starting.port);
     this.stopOwned();
     // An adoption that is still asking is over, and its record is not left for later: the
     // recorded server is stopped if it is beyond doubt the plugin's own, and the record is
@@ -214,7 +236,9 @@ export class ServerManager {
       const record = this.deps.loadRecord();
       if (!record) return Promise.resolve();
       const keepable =
-        isUsablePid(record.pid) && record.port === this.deps.getSettings().port && this.looksLikeQmdServer(record.pid);
+        isUsablePid(record.pid) &&
+        record.port === this.deps.getSettings().port &&
+        this.looksLikeQmdServer(record.pid);
       if (!keepable) {
         // On a port the plugin no longer uses, or not a QMD server at all. Whose it is does not
         // depend on the port that is set now.
@@ -234,7 +258,10 @@ export class ServerManager {
   private async settleRecorded(record: OwnedRecord): Promise<void> {
     const stops = this.stops;
     // A fair chance to answer: a server that is busy for a moment is still worth keeping.
-    const answered = await this.poll(() => this.deps.health(record.port), ADOPT_WAIT_MS);
+    const answered = await this.poll(
+      () => this.deps.health(record.port),
+      ADOPT_WAIT_MS,
+    );
     // A stop during the wait has settled the record itself, in `stopIfOwned`. A shutdown alone
     // leaves it, and signals nothing: a disposed manager starts nothing more, and the next load
     // examines the record. Nothing of this session can be owned or starting here: every start
@@ -315,7 +342,12 @@ export class ServerManager {
       // The launcher can exit while the server it spawned lives on in the group. The PID can be
       // reused only once the whole group is gone, so only then is the server forgotten.
       void server.exit.then(() => {
-        if (this.owned === record && !this.disposed && !this.deps.isAlive(record.pid)) this.forget(record);
+        if (
+          this.owned === record &&
+          !this.disposed &&
+          !this.deps.isAlive(record.pid)
+        )
+          this.forget(record);
       });
       return;
     }
@@ -323,16 +355,27 @@ export class ServerManager {
     // The start failed: 60 seconds passed, or the launcher exited. After a timeout the group is
     // still there; after an exit the server the launcher spawned may be. Either way it is the
     // group `spawnServer` created moments ago, so there is no identity check.
-    if (server.pid !== undefined && (outcome === "timeout" || this.deps.isAlive(server.pid))) {
+    if (
+      server.pid !== undefined &&
+      (outcome === "timeout" || this.deps.isAlive(server.pid))
+    ) {
       this.terminate(server.pid, port);
     }
     const tail = this.deps.logTail(port);
-    const errorCode = typeof outcome === "object" ? outcome.errorCode : undefined;
-    throw new QmdSearchError(classifyStartFailure(tail, errorCode), "The QMD server did not start.", tail);
+    const errorCode =
+      typeof outcome === "object" ? outcome.errorCode : undefined;
+    throw new QmdSearchError(
+      classifyStartFailure(tail, errorCode),
+      "The QMD server did not start.",
+      tail,
+    );
   }
 
   /** Waits until the spawned server answers health, exits, runs out of time, or is stopped. */
-  private untilStarted(port: number, server: SpawnedServer): Promise<StartOutcome> {
+  private untilStarted(
+    port: number,
+    server: SpawnedServer,
+  ): Promise<StartOutcome> {
     return new Promise((resolve) => {
       let settled = false;
       let pollTimer: Timer | undefined;
@@ -359,7 +402,11 @@ export class ServerManager {
         }, POLL_MS);
       };
       const deadline = setTimeout(() => settle("timeout"), STARTUP_LIMIT_MS);
-      const pending = { pid: server.pid, port, abort: (): void => settle("stopped") };
+      const pending = {
+        pid: server.pid,
+        port,
+        abort: (): void => settle("stopped"),
+      };
       this.pending = pending;
       void server.exit.then((exit) => {
         // A start that `dispose` stopped gives up its PID here too. With the launcher gone there
@@ -376,7 +423,10 @@ export class ServerManager {
    * Resolves true for a yes and false otherwise. `stopIfOwned` and `dispose` end it at once, with
    * false and with its timers cleared; the caller tells that from `stops` and `disposed`.
    */
-  private poll(ask: () => boolean | Promise<boolean>, limitMs: number): Promise<boolean> {
+  private poll(
+    ask: () => boolean | Promise<boolean>,
+    limitMs: number,
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false;
       let pollTimer: Timer | undefined;
@@ -414,14 +464,22 @@ export class ServerManager {
    */
   private waitForStopped(port: number): number {
     const now = performance.now();
-    this.stopped = this.stopped.filter((group) => now - group.at < STOPPED_WAIT_MS && this.deps.isAlive(group.pid));
-    const waits = this.stopped.filter((group) => group.port === port).map((group) => group.at + STOPPED_WAIT_MS - now);
+    this.stopped = this.stopped.filter(
+      (group) =>
+        now - group.at < STOPPED_WAIT_MS && this.deps.isAlive(group.pid),
+    );
+    const waits = this.stopped
+      .filter((group) => group.port === port)
+      .map((group) => group.at + STOPPED_WAIT_MS - now);
     return Math.max(0, ...waits);
   }
 
   /** Why a start that `stopIfOwned` or `dispose` overtook fails. */
   private overtaken(): QmdSearchError {
-    return new QmdSearchError("server-start", this.disposed ? SHUT_DOWN : CANCELLED);
+    return new QmdSearchError(
+      "server-start",
+      this.disposed ? SHUT_DOWN : CANCELLED,
+    );
   }
 
   /** Stops the owned server if its PID still looks like a QMD server, and forgets it either way. */
@@ -434,8 +492,14 @@ export class ServerManager {
    * that of a recorded server which the adoption does not keep. It is signalled only if it
    * passes the identity test now, and it is forgotten either way.
    */
-  private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-its-port"): void {
-    const ours = identity === "on-its-port" ? this.isServerOnItsPort(record) : this.looksLikeQmdServer(record.pid);
+  private stopRecorded(
+    record: OwnedRecord,
+    identity: "qmd-server" | "on-its-port",
+  ): void {
+    const ours =
+      identity === "on-its-port"
+        ? this.isServerOnItsPort(record)
+        : this.looksLikeQmdServer(record.pid);
     // Signal before clearing the record: a save that throws must not leave the server running.
     if (ours) this.terminate(record.pid, record.port);
     this.forget(record);
@@ -454,7 +518,12 @@ export class ServerManager {
     // Line by line: `qmd` in one process and `mcp` in another does not make either the server.
     return commandLines
       .split("\n")
-      .some((line) => line.includes("qmd") && line.includes("mcp") && (port === undefined || namesPort(line, port)));
+      .some(
+        (line) =>
+          line.includes("qmd") &&
+          line.includes("mcp") &&
+          (port === undefined || namesPort(line, port)),
+      );
   }
 
   /**
@@ -465,7 +534,11 @@ export class ServerManager {
    * decides whether a server is kept, not whose it is.
    */
   private isServerOnItsPort(record: OwnedRecord): boolean {
-    return isUsablePid(record.pid) && isUsablePort(record.port) && this.looksLikeQmdServer(record.pid, record.port);
+    return (
+      isUsablePid(record.pid) &&
+      isUsablePort(record.port) &&
+      this.looksLikeQmdServer(record.pid, record.port)
+    );
   }
 
   /**
@@ -498,7 +571,12 @@ export class ServerManager {
     }
     const saved = this.deps.loadRecord();
     // `Object.is`, so that a record whose PID or port is not a number at all is still its own match.
-    if (saved !== null && Object.is(saved.pid, record.pid) && Object.is(saved.port, record.port)) this.deps.saveRecord(null);
+    if (
+      saved !== null &&
+      Object.is(saved.pid, record.pid) &&
+      Object.is(saved.port, record.port)
+    )
+      this.deps.saveRecord(null);
   }
 }
 
@@ -515,5 +593,7 @@ function isUsablePort(port: number): boolean {
 /** True when the command line passes `--port` with exactly this port as the argument after it. */
 function namesPort(commandLine: string, port: number): boolean {
   const args = commandLine.split(/\s+/);
-  return args.some((arg, i) => arg === "--port" && args[i + 1] === String(port));
+  return args.some(
+    (arg, i) => arg === "--port" && args[i + 1] === String(port),
+  );
 }

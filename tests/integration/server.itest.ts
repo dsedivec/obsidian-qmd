@@ -8,15 +8,31 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, type KeyValueStore, type QmdSearchSettings } from "../../src/config";
+import {
+  DEFAULT_SETTINGS,
+  type KeyValueStore,
+  type QmdSearchSettings,
+} from "../../src/config";
 import { QmdCli } from "../../src/qmd-cli";
 import { QmdClient } from "../../src/qmd-client";
 import { toSearchResults } from "../../src/results";
-import { checkHealth, createServerDeps, SERVER_RECORD_KEY, serverLogPath } from "../../src/server-deps";
-import { ServerManager, type OwnedRecord, type ServerDeps, type SpawnedServer } from "../../src/server-manager";
+import {
+  checkHealth,
+  createServerDeps,
+  SERVER_RECORD_KEY,
+  serverLogPath,
+} from "../../src/server-deps";
+import {
+  ServerManager,
+  type OwnedRecord,
+  type ServerDeps,
+  type SpawnedServer,
+} from "../../src/server-manager";
 
 const COLLECTION = "itest";
-const FIXTURE_VAULT = fileURLToPath(new URL("../fixtures/vault", import.meta.url));
+const FIXTURE_VAULT = fileURLToPath(
+  new URL("../fixtures/vault", import.meta.url),
+);
 /** What points `qmd` at an index. Each is redirected into the temp directory for the whole file. */
 const ISOLATED = ["INDEX_PATH", "QMD_CONFIG_DIR"] as const;
 /** Longer than a server takes to stop, so a server that is still up after it was not signalled. */
@@ -24,7 +40,10 @@ const STOP_WOULD_SHOW_MS = 3000;
 
 function memoryStore(): KeyValueStore {
   const values = new Map<string, unknown>();
-  return { get: (key) => values.get(key), set: (key, value) => void values.set(key, value) };
+  return {
+    get: (key) => values.get(key),
+    set: (key, value) => void values.set(key, value),
+  };
 }
 
 function freePort(): Promise<number> {
@@ -60,13 +79,16 @@ function processAlive(pid: number): boolean {
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`Condition not met within ${timeoutMs} ms`);
+    if (Date.now() > deadline)
+      throw new Error(`Condition not met within ${timeoutMs} ms`);
     await sleep(50);
   }
 }
 
 describe("ServerManager with the real qmd", () => {
-  const savedEnv = Object.fromEntries(ISOLATED.map((name) => [name, process.env[name]]));
+  const savedEnv = Object.fromEntries(
+    ISOLATED.map((name) => [name, process.env[name]]),
+  );
   const savedCwd = process.cwd();
   let tmp: string;
   let settings: QmdSearchSettings;
@@ -78,11 +100,18 @@ describe("ServerManager with the real qmd", () => {
 
   async function qmd(args: string[], timeoutMs: number): Promise<void> {
     const result = await cli.run(args, { timeoutMs });
-    if (result.code !== 0) throw new Error(`qmd ${args.join(" ")} failed: ${JSON.stringify(result)}`);
+    if (result.code !== 0)
+      throw new Error(
+        `qmd ${args.join(" ")} failed: ${JSON.stringify(result)}`,
+      );
   }
 
   /** A manager over the real dependencies. `spawned` lists the servers it has started. */
-  function newManager(store: KeyValueStore = memoryStore()): { manager: ServerManager; deps: ServerDeps; spawned: SpawnedServer[] } {
+  function newManager(store: KeyValueStore = memoryStore()): {
+    manager: ServerManager;
+    deps: ServerDeps;
+    spawned: SpawnedServer[];
+  } {
     const real = createServerDeps({ cli, getSettings: () => settings, store });
     const spawned: SpawnedServer[] = [];
     const deps: ServerDeps = {
@@ -106,7 +135,11 @@ describe("ServerManager with the real qmd", () => {
     // qmd prefers a project-local .qmd/index.yml at or above its working directory over INDEX_PATH.
     process.chdir(tmp);
 
-    settings = { ...DEFAULT_SETTINGS, qmdPath: process.env.QMD_BIN ?? "qmd", port: await freePort() };
+    settings = {
+      ...DEFAULT_SETTINGS,
+      qmdPath: process.env.QMD_BIN ?? "qmd",
+      port: await freePort(),
+    };
     cli = new QmdCli(() => settings);
     client = new QmdClient(() => settings.port);
 
@@ -146,7 +179,10 @@ describe("ServerManager with the real qmd", () => {
     const store = memoryStore();
     const { manager, deps, spawned } = newManager(store);
     await manager.ensureRunning();
-    const raw = await client.query("sourdough starter hydration", { collection: COLLECTION, limit: 5 });
+    const raw = await client.query("sourdough starter hydration", {
+      collection: COLLECTION,
+      limit: 5,
+    });
     expect(toSearchResults(raw, COLLECTION)[0].path).toBe("HTML & markup.md");
 
     const { pid } = store.get(SERVER_RECORD_KEY) as OwnedRecord;
@@ -162,7 +198,12 @@ describe("ServerManager with the real qmd", () => {
     expect(await checkHealth(settings.port)).toBe(false);
     // The launcher's exit reaches the manager through `exit`. The timer only bounds a failure.
     expect(spawned.map((server) => server.pid)).toEqual([pid]);
-    expect(await Promise.race([spawned[0].exit, sleep(5000, "still pending", { ref: false })])).toEqual({ code: null });
+    expect(
+      await Promise.race([
+        spawned[0].exit,
+        sleep(5000, "still pending", { ref: false }),
+      ]),
+    ).toEqual({ code: null });
     manager.dispose();
   });
 
@@ -197,7 +238,12 @@ describe("ServerManager with the real qmd", () => {
 
     // The launcher alone, by its own PID. Waiting for `exit` makes sure that it is gone and reaped.
     process.kill(pid, "SIGKILL");
-    expect(await Promise.race([spawned[0].exit, sleep(5000, "still pending", { ref: false })])).toEqual({ code: null });
+    expect(
+      await Promise.race([
+        spawned[0].exit,
+        sleep(5000, "still pending", { ref: false }),
+      ]),
+    ).toEqual({ code: null });
     expect(processAlive(pid)).toBe(false);
 
     expect(deps.isAlive(pid)).toBe(true);
@@ -227,11 +273,19 @@ describe("ServerManager with the real qmd", () => {
     const startedAt = Date.now();
     const ticker = setInterval(() => {
       const checkedAt = Date.now();
-      checks.push(checkHealth(settings.port).then((healthy) => ({ healthy, ms: Date.now() - checkedAt })));
+      checks.push(
+        checkHealth(settings.port).then((healthy) => ({
+          healthy,
+          ms: Date.now() - checkedAt,
+        })),
+      );
     }, 250);
     let raw: unknown[];
     try {
-      raw = await client.query("espresso grind size", { collection: COLLECTION, limit: 5 });
+      raw = await client.query("espresso grind size", {
+        collection: COLLECTION,
+        limit: 5,
+      });
     } finally {
       clearInterval(ticker);
     }

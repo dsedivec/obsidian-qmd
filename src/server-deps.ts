@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KeyValueStore, QmdSearchSettings } from "./config";
 import type { QmdCli } from "./qmd-cli";
-import type { OwnedRecord, ServerDeps, SpawnedServer, SpawnExit } from "./server-manager";
+import type {
+  OwnedRecord,
+  ServerDeps,
+  SpawnedServer,
+  SpawnExit,
+} from "./server-manager";
 
 export const SERVER_RECORD_KEY = "qmd-search-server";
 
@@ -25,13 +30,21 @@ export function checkHealth(port: number, timeoutMs = 1000): Promise<boolean> {
     };
     const timer = setTimeout(() => finish(false), timeoutMs);
     try {
-      req = http.get({ host: "localhost", port, path: "/health", agent: false }, (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        // An answer that is cut off ends in `error`, never in `end`.
-        res.on("error", () => finish(false));
-        res.on("end", () => finish(res.statusCode === 200 && saysOk(Buffer.concat(chunks).toString("utf8"))));
-      });
+      req = http.get(
+        { host: "localhost", port, path: "/health", agent: false },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          // An answer that is cut off ends in `error`, never in `end`.
+          res.on("error", () => finish(false));
+          res.on("end", () =>
+            finish(
+              res.statusCode === 200 &&
+                saysOk(Buffer.concat(chunks).toString("utf8")),
+            ),
+          );
+        },
+      );
       req.on("error", () => finish(false));
     } catch {
       // `http.get` throws for a port number that cannot exist.
@@ -53,7 +66,11 @@ export function serverLogPath(port: number): string {
 }
 
 /** The Node side of `ServerManager`: real processes, signals, the log file and the saved record. */
-export function createServerDeps(opts: { cli: QmdCli; getSettings: () => QmdSearchSettings; store: KeyValueStore }): ServerDeps {
+export function createServerDeps(opts: {
+  cli: QmdCli;
+  getSettings: () => QmdSearchSettings;
+  store: KeyValueStore;
+}): ServerDeps {
   const { cli, getSettings, store } = opts;
   return {
     getSettings,
@@ -69,10 +86,19 @@ export function createServerDeps(opts: { cli: QmdCli; getSettings: () => QmdSear
 }
 
 function notSpawned(errorCode?: string): SpawnedServer {
-  return { pid: undefined, exit: Promise.resolve(errorCode === undefined ? { code: null } : { code: null, errorCode }) };
+  return {
+    pid: undefined,
+    exit: Promise.resolve(
+      errorCode === undefined ? { code: null } : { code: null, errorCode },
+    ),
+  };
 }
 
-function spawnServer(cli: QmdCli, getSettings: () => QmdSearchSettings, port: number): SpawnedServer {
+function spawnServer(
+  cli: QmdCli,
+  getSettings: () => QmdSearchSettings,
+  port: number,
+): SpawnedServer {
   let log: number;
   try {
     // Private to the user: the server logs the text of every query.
@@ -84,14 +110,20 @@ function spawnServer(cli: QmdCli, getSettings: () => QmdSearchSettings, port: nu
   try {
     // Detached, so that the launcher leads a process group that holds the real server too: the
     // launcher starts the server as its child and does not forward signals to it.
-    const child = spawn(getSettings().qmdPath, ["mcp", "--http", "--port", String(port)], {
-      detached: true,
-      stdio: ["ignore", log, log],
-      env: cli.env(),
-    });
+    const child = spawn(
+      getSettings().qmdPath,
+      ["mcp", "--http", "--port", String(port)],
+      {
+        detached: true,
+        stdio: ["ignore", log, log],
+        env: cli.env(),
+      },
+    );
     const exit = new Promise<SpawnExit>((resolve) => {
       child.on("exit", (code) => resolve({ code }));
-      child.on("error", (e: NodeJS.ErrnoException) => resolve({ code: null, errorCode: e.code }));
+      child.on("error", (e: NodeJS.ErrnoException) =>
+        resolve({ code: null, errorCode: e.code }),
+      );
     });
     return { pid: child.pid, exit };
   } catch (e) {
@@ -104,7 +136,11 @@ function spawnServer(cli: QmdCli, getSettings: () => QmdSearchSettings, port: nu
 
 function logTail(port: number): string {
   try {
-    return readFileSync(serverLogPath(port), "utf8").trimEnd().split("\n").slice(-LOG_TAIL_LINES).join("\n");
+    return readFileSync(serverLogPath(port), "utf8")
+      .trimEnd()
+      .split("\n")
+      .slice(-LOG_TAIL_LINES)
+      .join("\n");
   } catch {
     return "";
   }
@@ -133,17 +169,22 @@ function commandLine(pid: number): string | null {
   try {
     // Every process, filtered here: `ps -g` means different things on macOS and Linux. One `-o` for
     // each column, because some `ps` take everything after an `=` as that column's heading.
-    const output = execFileSync("/bin/ps", ["-A", "-o", "pgid=", "-o", "stat=", "-o", "command="], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: PS_TIMEOUT_MS,
-      maxBuffer: PS_MAX_OUTPUT_BYTES,
-    });
+    const output = execFileSync(
+      "/bin/ps",
+      ["-A", "-o", "pgid=", "-o", "stat=", "-o", "command="],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: PS_TIMEOUT_MS,
+        maxBuffer: PS_MAX_OUTPUT_BYTES,
+      },
+    );
     const commands: string[] = [];
     for (const row of output.split("\n")) {
       const match = /^\s*(\d+)\s+(\S+)\s+(.*\S)\s*$/.exec(row);
       // A state that starts with Z is a zombie: exited, and not a live member.
-      if (match && Number(match[1]) === pid && !match[2].startsWith("Z")) commands.push(match[3]);
+      if (match && Number(match[1]) === pid && !match[2].startsWith("Z"))
+        commands.push(match[3]);
     }
     return commands.length > 0 ? commands.join("\n") : null;
   } catch {
@@ -173,7 +214,12 @@ function isOrdinaryPid(pid: unknown): pid is number {
 }
 
 function isPort(port: unknown): port is number {
-  return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
+  return (
+    typeof port === "number" &&
+    Number.isInteger(port) &&
+    port >= 1 &&
+    port <= 65535
+  );
 }
 
 /** The saved value as a record, or null when it is anything but a usable PID and port. */

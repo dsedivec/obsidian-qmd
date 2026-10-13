@@ -1,4 +1,5 @@
-const WARNING = "QMD Search: could not read Obsidian's excluded files; excluding nothing.";
+const WARNING =
+  "QMD Search: could not read Obsidian's excluded files; excluding nothing.";
 
 function matchesFilter(path: string, filter: unknown): boolean {
   if (typeof filter !== "string" || filter.trim() === "") return false;
@@ -13,7 +14,10 @@ function matchesFilter(path: string, filter: unknown): boolean {
 }
 
 /** True when any Obsidian "Excluded files" filter matches the path. */
-export function matchesFilters(path: string, filters: readonly unknown[]): boolean {
+export function matchesFilters(
+  path: string,
+  filters: readonly unknown[],
+): boolean {
   return filters.some((filter) => matchesFilter(path, filter));
 }
 

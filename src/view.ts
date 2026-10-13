@@ -1,9 +1,22 @@
-import { ItemView, Keymap, Scope, type App, type PaneType, type WorkspaceLeaf } from "obsidian";
+import {
+  ItemView,
+  Keymap,
+  Scope,
+  type App,
+  type PaneType,
+  type WorkspaceLeaf,
+} from "obsidian";
 import { QmdSearchError } from "./errors";
 import type QmdSearchPlugin from "./main";
 import { highlightSegments, type SearchResult } from "./results";
 import type { SearchStatus } from "./search-service";
-import { folderLabel, footerText, moveSelection, scorePercent, statusText } from "./view-model";
+import {
+  folderLabel,
+  footerText,
+  moveSelection,
+  scorePercent,
+  statusText,
+} from "./view-model";
 
 export const VIEW_TYPE = "qmd-search-view";
 
@@ -12,7 +25,9 @@ const FOOTER_REFRESH_MS = 30_000;
 const LINK_TEXT = { settings: "Settings", retry: "Retry" } as const;
 
 /** The settings dialog, which Obsidian's type declarations leave out. */
-type AppWithSettingsDialog = App & { setting: { open(): void; openTabById(id: string): void } };
+type AppWithSettingsDialog = App & {
+  setting: { open(): void; openTabById(id: string): void };
+};
 
 /**
  * The search pane. Everything a note or QMD supplies (title, folder, snippet, error text) reaches
@@ -32,15 +47,20 @@ export class SearchView extends ItemView {
   private progress: { el: HTMLElement; timer: number } | null = null;
   private unsubscribe: (() => void) | null = null;
 
-  constructor(leaf: WorkspaceLeaf, private readonly plugin: QmdSearchPlugin) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    private readonly plugin: QmdSearchPlugin,
+  ) {
     super(leaf);
     const root = this.contentEl.createDiv({ cls: "qmd-search-view" });
-    this.inputEl = root.createDiv({ cls: "qmd-search-input-row" }).createEl("input", {
-      cls: "qmd-search-input",
-      type: "text",
-      placeholder: "Search with QMD…",
-      attr: { spellcheck: "false" },
-    });
+    this.inputEl = root
+      .createDiv({ cls: "qmd-search-input-row" })
+      .createEl("input", {
+        cls: "qmd-search-input",
+        type: "text",
+        placeholder: "Search with QMD…",
+        attr: { spellcheck: "false" },
+      });
     this.resultsEl = root.createDiv({ cls: "qmd-search-results" });
     this.footerEl = root.createDiv({ cls: "qmd-search-footer" });
 
@@ -112,7 +132,9 @@ export class SearchView extends ItemView {
     this.renderSession();
     this.unsubscribe = this.plugin.indexer.onChange(() => this.renderFooter());
     // "indexed 2 min ago" ages with nothing else to redraw it.
-    this.registerInterval(window.setInterval(() => this.renderFooter(), FOOTER_REFRESH_MS));
+    this.registerInterval(
+      window.setInterval(() => this.renderFooter(), FOOTER_REFRESH_MS),
+    );
   }
 
   protected async onClose(): Promise<void> {
@@ -132,7 +154,8 @@ export class SearchView extends ItemView {
     const el = createDiv({ cls: "qmd-search-status" });
     el.createSpan({ cls: "qmd-search-spinner" });
     const textEl = el.createSpan();
-    const draw = (): void => textEl.setText(statusText(status, Date.now() - startedAt));
+    const draw = (): void =>
+      textEl.setText(statusText(status, Date.now() - startedAt));
     draw();
     this.resultsEl.before(el);
     this.resultsEl.addClass("is-stale");
@@ -156,26 +179,46 @@ export class SearchView extends ItemView {
   private renderSession(): void {
     const { query, results, error } = this.plugin.session;
     // The rows are about to go. Focus on one of them would fall out of the pane.
-    if (this.resultsEl.contains(this.resultsEl.ownerDocument.activeElement)) this.inputEl.focus();
+    if (this.resultsEl.contains(this.resultsEl.ownerDocument.activeElement))
+      this.inputEl.focus();
     this.resultsEl.empty();
     this.rowEls = [];
     this.selectedEl = null;
     if (error !== null) {
       this.renderError(error);
     } else if (results !== null && results.length === 0) {
-      this.resultsEl.createDiv({ cls: "qmd-search-message", text: "No results." });
+      this.resultsEl.createDiv({
+        cls: "qmd-search-message",
+        text: "No results.",
+      });
     } else if (results !== null) {
-      this.rowEls = results.map((result, index) => this.renderResult(result, index, query));
+      this.rowEls = results.map((result, index) =>
+        this.renderResult(result, index, query),
+      );
     }
     this.renderFooter();
   }
 
-  private renderResult(result: SearchResult, index: number, query: string): HTMLElement {
-    const row = this.resultsEl.createDiv({ cls: "qmd-search-result", attr: { tabindex: "-1" } });
+  private renderResult(
+    result: SearchResult,
+    index: number,
+    query: string,
+  ): HTMLElement {
+    const row = this.resultsEl.createDiv({
+      cls: "qmd-search-result",
+      attr: { tabindex: "-1" },
+    });
     const head = row.createDiv({ cls: "qmd-search-result-head" });
     head.createDiv({ cls: "qmd-search-title", text: result.title });
-    head.createDiv({ cls: "qmd-search-score", text: scorePercent(result.score) });
-    if (result.folder !== "") row.createDiv({ cls: "qmd-search-folder", text: folderLabel(result.folder) });
+    head.createDiv({
+      cls: "qmd-search-score",
+      text: scorePercent(result.score),
+    });
+    if (result.folder !== "")
+      row.createDiv({
+        cls: "qmd-search-folder",
+        text: folderLabel(result.folder),
+      });
     const snippet = row.createDiv({ cls: "qmd-search-snippet" });
     for (const segment of highlightSegments(result.snippet, query)) {
       if (segment.bold) snippet.createEl("strong", { text: segment.text });
@@ -189,7 +232,10 @@ export class SearchView extends ItemView {
     row.addEventListener("keydown", (evt) => {
       if (evt.key === "Enter") {
         evt.preventDefault();
-        this.openNote(result, { newLeaf: Keymap.isModEvent(evt), focus: false });
+        this.openNote(result, {
+          newLeaf: Keymap.isModEvent(evt),
+          focus: false,
+        });
       } else if (evt.key === "ArrowUp" || evt.key === "ArrowDown") {
         evt.preventDefault();
         // `index` is this row's own place in the list, so the list is never empty here.
@@ -209,10 +255,14 @@ export class SearchView extends ItemView {
     const { message, detail, hint, links } = this.plugin.describe(error);
     const block = this.resultsEl.createDiv({ cls: "qmd-search-message" });
     block.createDiv({ cls: "qmd-search-error-message", text: message });
-    if (detail) block.createEl("pre", { cls: "qmd-search-error-detail", text: detail });
+    if (detail)
+      block.createEl("pre", { cls: "qmd-search-error-detail", text: detail });
     if (hint) block.createDiv({ cls: "qmd-search-error-hint", text: hint });
     for (const link of links) {
-      const linkEl = block.createEl("a", { cls: "qmd-search-link", text: LINK_TEXT[link] });
+      const linkEl = block.createEl("a", {
+        cls: "qmd-search-link",
+        text: LINK_TEXT[link],
+      });
       linkEl.addEventListener("click", () => {
         if (link === "settings") this.openSettings();
         else void this.runSearch();
@@ -222,8 +272,15 @@ export class SearchView extends ItemView {
 
   private renderFooter(): void {
     // A count describes results that are current, and none are while a search is replacing them.
-    const count = this.progress === null ? (this.plugin.session.results?.length ?? null) : null;
-    const { text, error } = footerText(count, this.plugin.indexer.getState(), Date.now());
+    const count =
+      this.progress === null
+        ? (this.plugin.session.results?.length ?? null)
+        : null;
+    const { text, error } = footerText(
+      count,
+      this.plugin.indexer.getState(),
+      Date.now(),
+    );
     this.footerEl.setText(text);
     this.footerEl.toggleClass("is-error", error);
   }
@@ -255,16 +312,22 @@ export class SearchView extends ItemView {
   }
 
   /** Not named `open`: Obsidian's View has a method of that name, which its type declarations leave out. */
-  private openNote(result: SearchResult, opts: { newLeaf: PaneType | boolean; focus: boolean }): void {
+  private openNote(
+    result: SearchResult,
+    opts: { newLeaf: PaneType | boolean; focus: boolean },
+  ): void {
     this.plugin
       .openResult(result, opts)
       .then(() => {
         // With "Always focus new tabs" on, Obsidian makes a new tab the active leaf, and then no
         // longer asks the pane's scope about keys. A note opened from the keyboard leaves the pane
         // active, as it leaves the focus on the row.
-        if (!opts.focus) this.app.workspace.setActiveLeaf(this.leaf, { focus: false });
+        if (!opts.focus)
+          this.app.workspace.setActiveLeaf(this.leaf, { focus: false });
       })
-      .catch((err: unknown) => console.error("QMD Search: could not open the note", err));
+      .catch((err: unknown) =>
+        console.error("QMD Search: could not open the note", err),
+      );
   }
 
   private openSettings(): void {

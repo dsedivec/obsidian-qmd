@@ -3,19 +3,34 @@
 // real server on a spare port. A string that a shell interpreted anywhere on the way, in the
 // plugin or in `qmd`, would create the sentinel file. Slow. Run with `npm run test:integration`.
 
-import { cpSync, existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, type KeyValueStore, type QmdSearchSettings } from "../../src/config";
+import {
+  DEFAULT_SETTINGS,
+  type KeyValueStore,
+  type QmdSearchSettings,
+} from "../../src/config";
 import { QmdSearchError } from "../../src/errors";
 import { QmdCli, type CliResult } from "../../src/qmd-cli";
 import { QmdClient } from "../../src/qmd-client";
 import { toSearchResults } from "../../src/results";
-import { checkHealth, createServerDeps, serverLogPath } from "../../src/server-deps";
+import {
+  checkHealth,
+  createServerDeps,
+  serverLogPath,
+} from "../../src/server-deps";
 import { ServerManager } from "../../src/server-manager";
 
 const hostile = (sentinel: string) => [
@@ -36,13 +51,18 @@ const hostile = (sentinel: string) => [
 
 const COLLECTION = "hostile";
 const VAULT_NAME = "va$ult `x` 'q' (1) && true";
-const FIXTURE_VAULT = fileURLToPath(new URL("../fixtures/vault", import.meta.url));
+const FIXTURE_VAULT = fileURLToPath(
+  new URL("../fixtures/vault", import.meta.url),
+);
 /** What points `qmd` at an index. Each is redirected into the temp directory for the whole file. */
 const ISOLATED = ["INDEX_PATH", "QMD_CONFIG_DIR"] as const;
 
 function memoryStore(): KeyValueStore {
   const values = new Map<string, unknown>();
-  return { get: (key) => values.get(key), set: (key, value) => void values.set(key, value) };
+  return {
+    get: (key) => values.get(key),
+    set: (key, value) => void values.set(key, value),
+  };
 }
 
 function freePort(): Promise<number> {
@@ -69,7 +89,8 @@ function groupAlive(pid: number): boolean {
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`Condition not met within ${timeoutMs} ms`);
+    if (Date.now() > deadline)
+      throw new Error(`Condition not met within ${timeoutMs} ms`);
     await sleep(50);
   }
 }
@@ -81,7 +102,9 @@ function tree(dir: string): string[] {
 
 // The tests are the stages of one run, in order: each needs what the ones before it left behind.
 describe("hostile text with the real qmd", () => {
-  const savedEnv = Object.fromEntries(ISOLATED.map((name) => [name, process.env[name]]));
+  const savedEnv = Object.fromEntries(
+    ISOLATED.map((name) => [name, process.env[name]]),
+  );
   const savedCwd = process.cwd();
   let tmp: string;
   let sentinel: string;
@@ -95,12 +118,18 @@ describe("hostile text with the real qmd", () => {
   const launchers: number[] = [];
 
   const expectNoSentinel = (after: string): void =>
-    expect(existsSync(sentinel), `a shell ran hostile text as a command: the sentinel appeared after ${after}`).toBe(false);
+    expect(
+      existsSync(sentinel),
+      `a shell ran hostile text as a command: the sentinel appeared after ${after}`,
+    ).toBe(false);
 
   /** Runs one `qmd` command that has to exit 0. */
   async function qmd(args: string[], timeoutMs: number): Promise<CliResult> {
     const result = await cli.run(args, { timeoutMs });
-    if (result.code !== 0) throw new Error(`qmd ${args.join(" ")} failed: ${JSON.stringify(result)}`);
+    if (result.code !== 0)
+      throw new Error(
+        `qmd ${args.join(" ")} failed: ${JSON.stringify(result)}`,
+      );
     expectNoSentinel(`qmd ${args.join(" ")}`);
     return result;
   }
@@ -114,7 +143,11 @@ describe("hostile text with the real qmd", () => {
 
     sentinel = join(tmp, "sentinel");
     strings = hostile(sentinel);
-    settings = { ...DEFAULT_SETTINGS, qmdPath: process.env.QMD_BIN ?? "qmd", port: await freePort() };
+    settings = {
+      ...DEFAULT_SETTINGS,
+      qmdPath: process.env.QMD_BIN ?? "qmd",
+      port: await freePort(),
+    };
     cli = new QmdCli(() => settings);
     client = new QmdClient(() => settings.port);
 
@@ -162,7 +195,11 @@ describe("hostile text with the real qmd", () => {
   });
 
   it("answers or refuses every hostile query, and still searches afterwards", async () => {
-    const real = createServerDeps({ cli, getSettings: () => settings, store: memoryStore() });
+    const real = createServerDeps({
+      cli,
+      getSettings: () => settings,
+      store: memoryStore(),
+    });
     manager = new ServerManager({
       ...real,
       spawnServer: (port) => {
@@ -184,9 +221,14 @@ describe("hostile text with the real qmd", () => {
       let outcome: string;
       let acceptable: boolean;
       try {
-        const raw = await client.query(text, { collection: COLLECTION, limit: 5 });
+        const raw = await client.query(text, {
+          collection: COLLECTION,
+          limit: 5,
+        });
         acceptable = Array.isArray(raw);
-        outcome = acceptable ? `resolved with ${raw.length} results` : `resolved with ${JSON.stringify(raw)}`;
+        outcome = acceptable
+          ? `resolved with ${raw.length} results`
+          : `resolved with ${JSON.stringify(raw)}`;
       } catch (error) {
         acceptable = error instanceof QmdSearchError && error.kind === "tool";
         outcome =
@@ -197,12 +239,20 @@ describe("hostile text with the real qmd", () => {
       expectNoSentinel(`the query ${name}`);
       outcomes.push(`${name}: ${outcome}`);
       if (!acceptable) failures.push(`${name}: ${outcome}`);
-      if (!(await checkHealth(settings.port))) failures.push(`${name}: the server did not answer a health check afterwards`);
+      if (!(await checkHealth(settings.port)))
+        failures.push(
+          `${name}: the server did not answer a health check afterwards`,
+        );
     }
-    console.log(`hostile queries against the real qmd:\n  ${outcomes.join("\n  ")}`);
+    console.log(
+      `hostile queries against the real qmd:\n  ${outcomes.join("\n  ")}`,
+    );
     expect(failures).toEqual([]);
 
-    const raw = await client.query("sourdough starter hydration", { collection: COLLECTION, limit: 5 });
+    const raw = await client.query("sourdough starter hydration", {
+      collection: COLLECTION,
+      limit: 5,
+    });
     expect(toSearchResults(raw, COLLECTION)[0].path).toBe("HTML & markup.md");
 
     manager.stopIfOwned();
@@ -220,6 +270,8 @@ describe("hostile text with the real qmd", () => {
       ...tree(FIXTURE_VAULT).map((path) => `${VAULT_NAME}/${path}`),
     ].sort();
     // SQLite keeps its write-ahead log and shared memory beside the index while it is in use.
-    expect(tree(tmp).filter((path) => !/^index\.sqlite-(wal|shm)$/.test(path))).toEqual(expected);
+    expect(
+      tree(tmp).filter((path) => !/^index\.sqlite-(wal|shm)$/.test(path)),
+    ).toEqual(expected);
   });
 });

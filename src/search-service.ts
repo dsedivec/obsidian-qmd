@@ -27,7 +27,10 @@ const aborted = () => new QmdSearchError("aborted", "Search cancelled.");
 export class SearchService {
   constructor(private readonly deps: SearchServiceDeps) {}
 
-  async search(text: string, opts: SearchOptions = {}): Promise<SearchResult[]> {
+  async search(
+    text: string,
+    opts: SearchOptions = {},
+  ): Promise<SearchResult[]> {
     const { signal, onStatus } = opts;
     if (signal?.aborted) throw aborted();
     const query = text.replace(/\s+/g, " ").trim();
@@ -36,8 +39,12 @@ export class SearchService {
     const { indexer, server, client } = this.deps;
     if (!(await indexer.whenReady())) {
       const state = indexer.getState();
-      if (state.kind === "failed") throw new QmdSearchError("index", state.message);
-      throw new QmdSearchError("not-ready", "The vault is still being indexed for the first time.");
+      if (state.kind === "failed")
+        throw new QmdSearchError("index", state.message);
+      throw new QmdSearchError(
+        "not-ready",
+        "The vault is still being indexed for the first time.",
+      );
     }
 
     const settings = this.deps.getSettings();
@@ -47,7 +54,11 @@ export class SearchService {
       await server.ensureRunning(onStatus);
       if (signal?.aborted) throw aborted();
       onStatus?.("searching");
-      return client.query(query, { collection: settings.collectionName, limit: wanted * 2, signal });
+      return client.query(query, {
+        collection: settings.collectionName,
+        limit: wanted * 2,
+        signal,
+      });
     };
 
     // The server is in use from before it is asked for until the search has its answer, the retry
@@ -58,7 +69,8 @@ export class SearchService {
       try {
         raw = await attempt();
       } catch (err) {
-        if (!(err instanceof QmdSearchError) || err.kind !== "connection") throw err;
+        if (!(err instanceof QmdSearchError) || err.kind !== "connection")
+          throw err;
         raw = await attempt();
       }
     } finally {
@@ -66,7 +78,9 @@ export class SearchService {
     }
 
     const results = toSearchResults(raw, settings.collectionName)
-      .filter((r) => this.deps.fileExists(r.path) && !this.deps.isExcluded(r.path))
+      .filter(
+        (r) => this.deps.fileExists(r.path) && !this.deps.isExcluded(r.path),
+      )
       .slice(0, wanted);
     server.noteActivity();
     return results;
