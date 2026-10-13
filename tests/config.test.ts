@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SETTINGS,
+  applySettingsPatch,
   buildPath,
   deriveCollectionName,
   isValidCollectionName,
   sanitizeSettings,
+  type QmdSearchSettings,
 } from "../src/config";
 
 describe("config", () => {
@@ -143,5 +145,203 @@ describe("config", () => {
       buildPath("qmd", "/opt/homebrew/bin", "/usr/bin:/opt/homebrew/bin"),
     ).toBe("/opt/homebrew/bin:/usr/bin");
     expect(buildPath("qmd", "", undefined)).toBe("");
+  });
+});
+
+// What a settings field does with what was typed into it. None of the values in use here is a
+// default, and the collection name is not the one the vault's name gives ("Scratch-Vault"), so a
+// value that was kept shows as kept and not as a default that happens to be the same.
+describe("applySettingsPatch", () => {
+  const VAULT = "Scratch Vault";
+  const before: QmdSearchSettings = {
+    qmdPath: "/opt/q/qmd",
+    extraPath: "/a:/b",
+    collectionName: "Custom_1",
+    port: 9000,
+    idleTimeoutMinutes: 30,
+    reindexQuietMinutes: 7,
+    resultCount: 12,
+  };
+  /** The settings after `patch`, as the fields that differ from `before`. */
+  const changed = (patch: Record<string, unknown>) => {
+    const after = applySettingsPatch(before, patch, VAULT);
+    expect(Object.keys(after).sort()).toEqual(Object.keys(before).sort());
+    return Object.fromEntries(
+      Object.entries(after).filter(
+        ([key, value]) => value !== before[key as keyof QmdSearchSettings],
+      ),
+    );
+  };
+
+  it("leaves every field that is not in the patch as it was", () => {
+    expect(applySettingsPatch(before, {}, VAULT)).toEqual(before);
+    expect(changed({ resultCount: 7 })).toEqual({ resultCount: 7 });
+    expect(changed({ noSuchSetting: 1 })).toEqual({});
+  });
+  it("returns new settings and leaves the ones it was given alone", () => {
+    const given = { ...before };
+    const after = applySettingsPatch(given, { port: 9001 }, VAULT);
+    expect(after).not.toBe(given);
+    expect(given).toEqual(before);
+  });
+
+  describe("collection name", () => {
+    it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+      ["a typo with a space", { collectionName: "has space" }, {}],
+      ["a leading hyphen", { collectionName: "-x" }, {}],
+      ["an empty name", { collectionName: "" }, {}],
+      ["a blank name", { collectionName: "   " }, {}],
+      ["a value that is not a string", { collectionName: 5 }, {}],
+      ["undefined", { collectionName: undefined }, {}],
+      [
+        "a valid name",
+        { collectionName: "Notes_2" },
+        { collectionName: "Notes_2" },
+      ],
+      [
+        "a valid name with spaces around it",
+        { collectionName: " Notes_2 " },
+        { collectionName: "Notes_2" },
+      ],
+      ["the name already in use", { collectionName: "Custom_1" }, {}],
+      ["another setting only", { resultCount: 7 }, { resultCount: 7 }],
+      [
+        "a typo beside a QMD path change",
+        { collectionName: "has space", qmdPath: "/new/qmd" },
+        { qmdPath: "/new/qmd" },
+      ],
+      [
+        "a valid name beside a QMD path change",
+        { collectionName: "Notes_2", qmdPath: "/new/qmd" },
+        { collectionName: "Notes_2", qmdPath: "/new/qmd" },
+      ],
+    ])("%s changes %j by %j", (_name, patch, expected) => {
+      expect(changed(patch)).toEqual(expected);
+    });
+    // The name made from the vault's is what loading falls back to. Here it would be a collection
+    // that the indexer creates and nothing ever removes.
+    it("never puts the name made from the vault's in place of an invalid one", () => {
+      for (const collectionName of ["has space", "-x", "", "a/b", 5, null])
+        expect(
+          applySettingsPatch(before, { collectionName }, VAULT).collectionName,
+        ).toBe("Custom_1");
+    });
+  });
+
+  describe.each([
+    ["port", 1, 65_535],
+    ["idleTimeoutMinutes", 1, 1440],
+    ["reindexQuietMinutes", 1, 120],
+    ["resultCount", 1, 50],
+  ] as const)("%s", (key, min, max) => {
+    it.each<[string, unknown]>([
+      ["a cleared field", ""],
+      ["blanks", "  "],
+      ["text", "abc"],
+      ["text that begins with digits", "12abc"],
+      ["null", null],
+      ["undefined", undefined],
+      ["true", true],
+      ["false", false],
+      ["an empty array", []],
+      ["an array of one number", [7]],
+      ["an object", {}],
+      ["NaN", Number.NaN],
+      ["infinity", Number.POSITIVE_INFINITY],
+      ["infinity written as text", "Infinity"],
+    ])(
+      "keeps the previous value when given %s, which is not a number",
+      (_name, value) => {
+        expect(changed({ [key]: value })).toEqual({});
+      },
+    );
+    it("takes a number, and a number written as a string, spaces around it or not", () => {
+      expect(changed({ [key]: 40 })).toEqual({ [key]: 40 });
+      expect(changed({ [key]: " 41 " })).toEqual({ [key]: 41 });
+    });
+    it("rounds to a whole number", () => {
+      expect(changed({ [key]: 40.4 })).toEqual({ [key]: 40 });
+      expect(changed({ [key]: "40.6" })).toEqual({ [key]: 41 });
+    });
+    it("takes the ends of its range", () => {
+      expect(changed({ [key]: min })).toEqual({ [key]: min });
+      expect(changed({ [key]: max })).toEqual({ [key]: max });
+    });
+  });
+
+  it.each([
+    ["idleTimeoutMinutes", 0, 1],
+    ["idleTimeoutMinutes", -5, 1],
+    ["idleTimeoutMinutes", 100_000, 1440],
+    ["reindexQuietMinutes", 0, 1],
+    ["reindexQuietMinutes", "500", 120],
+    ["resultCount", 0, 1],
+    ["resultCount", -3, 1],
+    ["resultCount", 999, 50],
+    ["resultCount", "51", 50],
+  ])(
+    "%s %j is out of range and becomes %j, the nearest value allowed",
+    (key, value, expected) => {
+      expect(changed({ [key]: value })).toEqual({ [key]: expected });
+    },
+  );
+  // A port is not a quantity: the nearest allowed one is no more what was meant than any other.
+  it.each([[0], [-1], [65_536], [70_000], ["0"], ["99999"], [0.4], [65_535.5]])(
+    "port %j is out of range and the previous port is kept",
+    (port) => {
+      expect(changed({ port })).toEqual({});
+    },
+  );
+
+  describe("QMD path", () => {
+    it("is trimmed", () => {
+      expect(changed({ qmdPath: " /opt/q md/qmd " })).toEqual({
+        qmdPath: "/opt/q md/qmd",
+      });
+    });
+    it.each([[""], ["   "], [5], [null], [undefined]])(
+      "keeps the previous path when given %j",
+      (qmdPath) => {
+        expect(changed({ qmdPath })).toEqual({});
+      },
+    );
+  });
+
+  describe("extra PATH directories", () => {
+    it("are normalised: trimmed, with empty entries dropped", () => {
+      expect(changed({ extraPath: " /c : :/d:" })).toEqual({
+        extraPath: "/c:/d",
+      });
+    });
+    it.each([[""], ["   "], [" : "]])(
+      "may be blank (%j), which means none",
+      (extraPath) => {
+        expect(changed({ extraPath })).toEqual({ extraPath: "" });
+      },
+    );
+    it.each([[5], [null], [undefined]])(
+      "keep the previous value when given %j, which is not text",
+      (extraPath) => {
+        expect(changed({ extraPath })).toEqual({});
+      },
+    );
+  });
+
+  it("applies every field of one patch by its own rule", () => {
+    expect(
+      changed({
+        qmdPath: "  ",
+        extraPath: "",
+        collectionName: "bad name",
+        port: "abc",
+        idleTimeoutMinutes: 5000,
+        reindexQuietMinutes: "3",
+        resultCount: null,
+      }),
+    ).toEqual({
+      extraPath: "",
+      idleTimeoutMinutes: 1440,
+      reindexQuietMinutes: 3,
+    });
   });
 });

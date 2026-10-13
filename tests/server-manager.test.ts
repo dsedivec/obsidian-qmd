@@ -9,7 +9,7 @@ import {
 const MIN = 60_000;
 const QMD_CMD = "node /x/bin/qmd mcp --http --port 8181";
 const CANCELLED = "The QMD server start was cancelled.";
-const SHUT_DOWN = "The QMD server manager was shut down.";
+const SHUT_DOWN = "QMD Search was shut down.";
 
 interface FakeOptions {
   healthy: boolean;

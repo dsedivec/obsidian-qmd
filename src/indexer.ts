@@ -240,9 +240,17 @@ export class Indexer {
 
   private assertSucceeded(args: string[], result: CliResult): void {
     const command = `qmd ${args.join(" ")}`;
-    if (result.errorCode === "ENOENT" || result.errorCode === "EACCES") {
+    const { errorCode } = result;
+    if (errorCode === "ENOENT" || errorCode === "EACCES") {
       throw new Error(
         `Couldn't run qmd at "${this.deps.getSettings().qmdPath}".`,
+      );
+    }
+    // Not started for any other reason, such as `ENOTDIR` for a path that treats a file as a
+    // folder. The code is named: "killed before it finished" would point away from the path.
+    if (errorCode !== undefined && result.code === null) {
+      throw new Error(
+        `Couldn't run qmd at "${this.deps.getSettings().qmdPath}" (${errorCode}).`,
       );
     }
     if (result.timedOut) throw new Error(`${command} timed out`);

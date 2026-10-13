@@ -72,11 +72,16 @@ export function describeError(
         links: ["settings"],
       };
     case "server-start":
-      return {
-        message: "Couldn't start the QMD server.",
-        ...detail,
-        links: ["settings", "retry"],
-      };
+      // With the tail of the server's log, the start failed and the log says how. With none, the
+      // error's own message is all there is to say: the start was cancelled, the plugin was shut
+      // down, or the server wrote nothing. A setting is not the fix for those, so only Retry.
+      return err.detail
+        ? {
+            message: "Couldn't start the QMD server.",
+            ...detail,
+            links: ["settings", "retry"],
+          }
+        : { message: err.message, links: ["retry"] };
     case "connection":
       return {
         message: "Lost the connection to the QMD server.",

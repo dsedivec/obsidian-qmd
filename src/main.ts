@@ -14,7 +14,7 @@ import {
   createCliHandler,
 } from "./cli-handler";
 import {
-  isValidCollectionName,
+  applySettingsPatch,
   sanitizeSettings,
   type KeyValueStore,
   type QmdSearchSettings,
@@ -31,7 +31,7 @@ import { ServerManager } from "./server-manager";
 import { QmdSearchSettingTab } from "./settings";
 import { SearchView, VIEW_TYPE } from "./view";
 
-/** A value may be as raw as the text of a settings field: every one is sanitised before it becomes a setting. */
+/** A value may be as raw as the text of a settings field: `applySettingsPatch` decides what becomes of it. */
 type SettingsPatch = { [K in keyof QmdSearchSettings]?: unknown };
 
 /** Runs one step and logs a throw, so that a failing step never skips the ones after it. */
@@ -163,20 +163,8 @@ export default class QmdSearchPlugin extends Plugin {
 
   async updateSettings(patch: SettingsPatch): Promise<void> {
     const before = this.settings;
-    // A collection name that is not valid is refused and the name in use is kept. Sanitising it
-    // would put the name derived from the vault in its place, and the indexer would then create
-    // that collection: a typo must not leave behind a collection that the plugin never removes.
-    const typed =
-      typeof patch.collectionName === "string"
-        ? patch.collectionName.trim()
-        : "";
-    const collectionName = isValidCollectionName(typed)
-      ? typed
-      : before.collectionName;
-    const after = sanitizeSettings(
-      { ...before, ...patch, collectionName },
-      this.app.vault.getName(),
-    );
+    // A value that cannot be used keeps the one in use.
+    const after = applySettingsPatch(before, patch, this.app.vault.getName());
     this.settings = after;
     // Acted on before the save is awaited, so that no search can start a server from the new
     // settings in between and have it stopped here.

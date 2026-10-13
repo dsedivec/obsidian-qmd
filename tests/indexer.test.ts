@@ -201,6 +201,17 @@ describe("Indexer", () => {
   it.each<[CliResult, string]>([
     [{ ...OK, code: null, errorCode: "ENOENT" }, `Couldn't run qmd at "qmd".`],
     [{ ...OK, code: null, errorCode: "EACCES" }, `Couldn't run qmd at "qmd".`],
+    // Any other reason it could not be started is named. `ENOTDIR` is a path that treats a file as
+    // a folder, such as one with a trailing slash. `ECONFIG` is `QmdCli`'s own code for a spawn that
+    // threw an error with no code.
+    [
+      { ...OK, code: null, errorCode: "ENOTDIR" },
+      `Couldn't run qmd at "qmd" (ENOTDIR).`,
+    ],
+    [
+      { ...OK, code: null, errorCode: "ECONFIG" },
+      `Couldn't run qmd at "qmd" (ECONFIG).`,
+    ],
     [
       { ...OK, code: null, timedOut: true },
       "qmd collection show Main timed out",

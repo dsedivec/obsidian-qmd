@@ -1,3 +1,5 @@
+import { isUsablePort } from "./process-group";
+
 export interface QmdSearchSettings {
   qmdPath: string;
   extraPath: string;
@@ -107,6 +109,62 @@ export function sanitizeSettings(
     ),
     resultCount: clampedSetting(obj.resultCount, d.resultCount, 1, 50),
   };
+}
+
+/** The settings that are whole numbers. */
+const NUMBER_SETTINGS = [
+  "port",
+  "idleTimeoutMinutes",
+  "reindexQuietMinutes",
+  "resultCount",
+] as const;
+
+/**
+ * The settings after a change made in the settings tab. `patch` holds the fields that changed,
+ * each as raw as the text typed into it; a field that is not in it stays as it is. A value that
+ * cannot be used keeps the one in use, where `sanitizeSettings`, for loading, falls back to the
+ * default:
+ *
+ * - Collection name: trimmed. One that is not valid keeps the name in use. The fallback of
+ *   `sanitizeSettings` is the name made from the vault's, and the indexer would then create that
+ *   collection: a typo must not leave behind a collection that the plugin never removes.
+ * - A number: a value that is not a number keeps the one in use. A number is rounded, and one
+ *   outside the setting's range becomes the nearest value in it. The port is the exception: a
+ *   number that is not a port keeps the port in use.
+ * - QMD path: trimmed. A blank one keeps the path in use.
+ * - Extra PATH directories: normalised. Blank is allowed, and means none.
+ */
+export function applySettingsPatch(
+  before: QmdSearchSettings,
+  patch: Record<string, unknown>,
+  vaultName: string,
+): QmdSearchSettings {
+  const next: Record<string, unknown> = { ...before };
+
+  if ("collectionName" in patch) {
+    const name = readString(patch.collectionName)?.trim();
+    if (name !== undefined && isValidCollectionName(name))
+      next.collectionName = name;
+  }
+  if ("qmdPath" in patch) {
+    const qmdPath = readString(patch.qmdPath)?.trim();
+    if (qmdPath) next.qmdPath = qmdPath;
+  }
+  if ("extraPath" in patch) {
+    const extraPath = readString(patch.extraPath);
+    if (extraPath !== undefined) next.extraPath = extraPath;
+  }
+  for (const key of NUMBER_SETTINGS) {
+    if (!(key in patch)) continue;
+    const n = readNumber(patch[key]);
+    if (n === undefined) continue;
+    if (key === "port" && !isUsablePort(n)) continue;
+    next[key] = n;
+  }
+
+  // Each value is now the one in use or a new one that can be used. Sanitising them trims and
+  // normalises as it does on loading, and holds each number to its range.
+  return sanitizeSettings(next, vaultName);
 }
 
 function splitPath(path: string): string[] {

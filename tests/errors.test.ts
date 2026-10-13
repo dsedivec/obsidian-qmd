@@ -62,6 +62,19 @@ describe("describeError", () => {
         links: ["settings", "retry"],
       },
     ],
+    // With no log tail, the error's own message says what happened, and settings are not the fix.
+    [
+      E("server-start", "The QMD server start was cancelled."),
+      { message: "The QMD server start was cancelled.", links: ["retry"] },
+    ],
+    [
+      E("server-start", "QMD Search was shut down."),
+      { message: "QMD Search was shut down.", links: ["retry"] },
+    ],
+    [
+      E("server-start", "The QMD server did not start.", ""),
+      { message: "The QMD server did not start.", links: ["retry"] },
+    ],
     [
       E("connection"),
       { message: "Lost the connection to the QMD server.", links: ["retry"] },

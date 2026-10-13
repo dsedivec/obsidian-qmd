@@ -47,7 +47,9 @@ const KILL_GRACE_MS = 5_000;
 const STOPPED_WAIT_MS = 6_000;
 /** How long a recorded server has to answer health before the adoption takes it for hung. */
 const ADOPT_WAIT_MS = 3_000;
-const SHUT_DOWN = "The QMD server manager was shut down.";
+// Shown to the user as they are: `describeError` uses the message of a start error that carries
+// no log tail.
+const SHUT_DOWN = "QMD Search was shut down.";
 const CANCELLED = "The QMD server start was cancelled.";
 
 type Timer = ReturnType<typeof setTimeout>;
