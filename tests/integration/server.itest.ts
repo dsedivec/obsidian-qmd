@@ -142,6 +142,7 @@ describe("ServerManager with the real qmd", () => {
 
     const { pid } = store.get(SERVER_RECORD_KEY) as OwnedRecord;
     expect(deps.isAlive(pid)).toBe(true);
+    expect(groupAlive(pid)).toBe(true);
     const commandLine = deps.commandLine(pid);
     expect(commandLine).toContain("qmd");
     expect(commandLine).toContain(`mcp --http --port ${settings.port}`);

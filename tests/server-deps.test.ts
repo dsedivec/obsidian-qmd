@@ -86,6 +86,16 @@ describe("server-deps", () => {
       await waitFor(() => sockets.size === 0);
     });
 
+    it("is false, without waiting out the time allowed, when the answer is cut off after what reads as a whole body", async () => {
+      handler = (_req, res) => {
+        res.writeHead(200, { "Content-Length": "40" });
+        res.write('{"status":"ok"}', () => res.destroy());
+      };
+      const startedAt = Date.now();
+      expect(await checkHealth(port, 3000)).toBe(false);
+      expect(Date.now() - startedAt).toBeLessThan(1500);
+    });
+
     it("is false, not a rejection, for a port that cannot exist", async () => {
       expect(await checkHealth(70_000)).toBe(false);
     });

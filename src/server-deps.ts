@@ -26,10 +26,9 @@ export function checkHealth(port: number, timeoutMs = 1000): Promise<boolean> {
       req = http.get({ host: "localhost", port, path: "/health", agent: false }, (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        // An answer that is cut off ends in `error`, never in `end`.
         res.on("error", () => finish(false));
-        res.on("close", () => {
-          finish(res.complete && res.statusCode === 200 && saysOk(Buffer.concat(chunks).toString("utf8")));
-        });
+        res.on("end", () => finish(res.statusCode === 200 && saysOk(Buffer.concat(chunks).toString("utf8"))));
       });
       req.on("error", () => finish(false));
     } catch {
