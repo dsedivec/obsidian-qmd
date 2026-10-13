@@ -155,6 +155,11 @@ out of it on purpose must stay out:
   file. A test that needs a home folder uses a made-up one.
 - The history from before publication is kept under `refs/archive/`. Push
   branches by name, and never with `--mirror`.
+- Do not check out an archive ref in this working tree. The design papers are
+  tracked there, so switching back to a branch deletes the working copy of them.
+  Read an archive ref with `git show`, or in a worktree of its own. If the
+  papers are lost from the working tree, they are restored with
+  `git archive refs/archive/design-papers docs/superpowers | tar -x`.
 
 ### User-facing wording
 
