@@ -47,7 +47,10 @@ type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
 interface StoppedGroup { pid: number; port: number; at: number }
 
 /**
- * Makes sure a QMD server is reachable and stops only its own.
+ * Makes sure a QMD server is reachable and stops only its own. It is there for two things: that
+ * the plugin never leaves behind a server it started, and that it never signals a process it did
+ * not start or adopt. The cases in which a server it started can still be left behind are set
+ * out as known limits in the design document, under "ServerManager".
  *
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
  * `pending`, then in `owned`), or with one from a saved record that passed the checks in
@@ -65,20 +68,20 @@ interface StoppedGroup { pid: number; port: number; at: number }
  * owns a server: a start that has waited asks for health again, and stops what it has come to
  * own meanwhile, before it goes on.
  *
- * `adoptIfOurs` is to be called once, at load, and to have settled before the first
- * `ensureRunning`. At load the plugin does so: it awaits `adoptIfOurs` before it starts the
- * indexer, and every search waits for the indexer. (A settings change in those seconds can start
- * the indexer sooner.) A caller that lets a start overlap the adoption's three seconds still gets
- * both guarantees, but a worse answer: with no group of its own stopped on the port, that start
- * spawns at once, and fails as "port in use" for as long as the hung recorded server holds the
- * port. The adoption then stands down for the server being started, and leaves the record to the
- * next load.
+ * A start waits for an adoption that is in progress. `ensureRunning` asks nothing and spawns
+ * nothing until that `adoptIfOurs` has settled, so the server on record has been adopted,
+ * stopped or struck from the record before the start decides anything. The start then goes on as
+ * usual: an adopted server answers its health check, and a stopped one is a group to wait for.
+ * The other way round there is no waiting: an adoption that begins while a start is in progress
+ * runs beside it, and stands down, leaving the record, for a server that start has spawned. That
+ * order is one of the known limits; the plugin calls `adoptIfOurs` once, at load, before any
+ * start.
  *
  * `stopIfOwned` and `dispose` also overtake work that is waiting: on a health answer, for a
- * stopped server to be gone, or for a recorded server to answer. A start does not go on to
- * spawn, and an adoption does not go on to own or to signal. After `dispose` the manager spawns
- * nothing, owns nothing new and never arms the idle timer again; only `stopIfOwned` still acts.
- * A SIGKILL follow-up is the one timer `dispose` leaves alone.
+ * stopped server to be gone, for a recorded server to answer, or for an adoption to settle. A
+ * start does not go on to spawn, and an adoption does not go on to own or to signal. After
+ * `dispose` the manager spawns nothing, owns nothing new and never arms the idle timer again;
+ * only `stopIfOwned` still acts. A SIGKILL follow-up is the one timer `dispose` leaves alone.
  */
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
@@ -102,6 +105,8 @@ export class ServerManager {
   private holds = 0;
   /** Ends each `poll` in progress. `stopIfOwned` and `dispose` call them all. */
   private readonly polls = new Set<() => void>();
+  /** The adoptions in progress, each as a promise that resolves when it has settled, whichever way. */
+  private readonly adoptions = new Set<Promise<void>>();
 
   constructor(private readonly deps: ServerDeps) {}
 
@@ -172,9 +177,25 @@ export class ServerManager {
    * Crash recovery, for a server recorded by an earlier session. One that answers health is taken
    * back as owned. One that does not answer within three seconds, and is this port's server by
    * its command line, is stopped: nothing else would ever stop it. Otherwise the record is
-   * cleared and nothing is signalled.
+   * cleared and nothing is signalled. A start that begins before this has settled waits for it.
    */
   async adoptIfOurs(): Promise<void> {
+    let settle = (): void => {};
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.adoptions.add(settled);
+    try {
+      await this.adopt();
+    } finally {
+      // Before this call's own promise settles, so that a caller who awaited it finds no adoption
+      // in progress.
+      this.adoptions.delete(settled);
+      settle();
+    }
+  }
+
+  private async adopt(): Promise<void> {
     if (this.disposed) return;
     const record = this.deps.loadRecord();
     if (!record) return;
@@ -223,6 +244,13 @@ export class ServerManager {
   private async start(listeners: StatusListener[]): Promise<void> {
     const { port } = this.deps.getSettings();
     const stops = this.stops;
+    // An adoption in progress settles first: until the server on record has been adopted, stopped
+    // or struck from the record, a health answer cannot be told from that server's, and a spawn
+    // could land beside it. A stop or a shutdown ends the adoption's own wait, and so this one.
+    if (this.adoptions.size > 0) {
+      await Promise.all(this.adoptions);
+      if (this.disposed || this.stops !== stops) throw this.overtaken();
+    }
     const healthy = await this.deps.health(port);
     if (this.disposed || this.stops !== stops) throw this.overtaken();
     if (healthy) return;

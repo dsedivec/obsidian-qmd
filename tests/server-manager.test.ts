@@ -1393,11 +1393,15 @@ describe("ServerManager at load, with a recorded server that does not answer", (
     expect(s.killed).toEqual([]); expect(s.record).toEqual(saved);
   });
   it("leaves it and its record alone when this session has spawned a server of its own by then", async () => {
-    const { m, s } = recorded();
+    // The start begins first and is still in its first health check when the adoption begins. A
+    // start that began second would wait for the adoption, and spawn nothing during it.
+    const { m, s } = recorded({ deferHealth: true });
+    const call = watch(m.ensureRunning());
     const adopting = watch(m.adoptIfOurs());
-    await vi.advanceTimersByTimeAsync(1000);
-    const call = watch(m.ensureRunning()); // spawns pid 4242, which never answers either
-    await vi.advanceTimersByTimeAsync(2000);
+    s.deferHealth = false;
+    s.answerHealth(false); // the start's: it spawns pid 4242, which never answers either
+    s.answerHealth(false); // the adoption's first
+    await vi.advanceTimersByTimeAsync(3000);
     expect(adopting.state).toBe("resolved"); expect(s.events).toEqual(["spawn 4242"]); expect(s.record).toEqual(saved);
     m.stopIfOwned();
     await flush();
@@ -1613,10 +1617,16 @@ describe("ServerManager spawning on a port where it has stopped a server", () =>
     expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
   });
   it("with a second group stopped on the port during the wait, waits six seconds from that one's SIGTERM too", async () => {
-    const { m, s } = await twoStopped();
-    await vi.advanceTimersByTimeAsync(500);
-    const call = watch(m.ensureRunning()); // 1.5 s in: only pid 4242 has been stopped so far
-    await vi.advanceTimersByTimeAsync(2500);
+    // As `twoStopped`, but the start begins before the adoption and so does not wait for it.
+    const { deps, s } = fake({ healthy: false, record: { pid: 777, port: 8181 }, alive: [777], cmd: SERVER_CMD });
+    const m = new ServerManager(deps);
+    watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    nextStart(s);
+    const call = watch(m.ensureRunning()); // 1 s in: only pid 4242 has been stopped so far
+    void m.adoptIfOurs(); // stops pid 777 at 4 s, during the start's wait
+    await vi.advanceTimersByTimeAsync(3000);
     expect(s.events).toEqual([...STOPPED, "SIGTERM 777"]);
     await vi.advanceTimersByTimeAsync(3000); // 7 s in: six seconds since pid 4242 got SIGTERM
     expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242"]); expect(call.state).toBe("pending");
@@ -1690,20 +1700,20 @@ describe("ServerManager after it has waited for a stopped group", () => {
   }
 
   /**
-   * Pid 4242 was spawned and stopped while starting, at 1 s. An adoption of the recorded server,
-   * pid 777, which does not answer yet, began then. At 1.5 s a start begins and waits for pid 4242.
+   * Pid 4242 was spawned and stopped while starting, at 1 s. A start began then and waits for pid
+   * 4242, and after it an adoption of the recorded server, pid 777, which does not answer yet. In
+   * that order the start does not wait for the adoption; had the adoption begun first, it would.
    */
-  async function startWaitingDuringAdoption(): Promise<{ m: ServerManager; s: FakeState; call: ReturnType<typeof watch> }> {
+  async function adoptionBeginsDuringWait(): Promise<{ m: ServerManager; s: FakeState; call: ReturnType<typeof watch> }> {
     const { deps, s } = fake({ healthy: false, record: { pid: 777, port: 8181 }, alive: [777], cmd: SERVER_CMD });
     const m = new ServerManager(deps);
     watch(m.ensureRunning());
     await vi.advanceTimersByTimeAsync(1000);
     m.stopIfOwned();
-    void m.adoptIfOurs();
     nextStart(s);
-    await vi.advanceTimersByTimeAsync(500);
     const call = watch(m.ensureRunning());
-    await vi.advanceTimersByTimeAsync(500);
+    void m.adoptIfOurs();
+    await vi.advanceTimersByTimeAsync(1000);
     expect(s.events).toEqual(STOPPED); expect(call.state).toBe("pending");
     return { m, s, call };
   }
@@ -1723,7 +1733,7 @@ describe("ServerManager after it has waited for a stopped group", () => {
     expect(s.spawned).toHaveLength(2);
   });
   it("uses a server that an adoption came to own during the wait: it spawns nothing, and that server stays owned and recorded", async () => {
-    const { s, call } = await startWaitingDuringAdoption();
+    const { s, call } = await adoptionBeginsDuringWait();
     s.healthy = true; // the recorded server answers after all
     await vi.advanceTimersByTimeAsync(250);
     expect(s.record).toEqual({ pid: 777, port: 8181 }); expect(call.state).toBe("pending");
@@ -1755,7 +1765,7 @@ describe("ServerManager after it has waited for a stopped group", () => {
     expect(s.events).toEqual([...STOPPED, "SIGKILL 4242"]); expect(s.spawned).toHaveLength(1);
   });
   it("stops a server that came to be owned during the wait and does not answer, waits for it too, and then spawns once", async () => {
-    const { s, call } = await startWaitingDuringAdoption();
+    const { s, call } = await adoptionBeginsDuringWait();
     s.healthy = true;
     await vi.advanceTimersByTimeAsync(250);
     expect(s.record).toEqual({ pid: 777, port: 8181 }); // the adoption owns pid 777
@@ -1774,7 +1784,7 @@ describe("ServerManager after it has waited for a stopped group", () => {
     expect(s.spawned).toHaveLength(2); expect(s.record).toEqual({ pid: 5151, port: 8181 });
   });
   it("does not signal a PID that came to be owned during the wait when it no longer looks like the server", async () => {
-    const { s, call } = await startWaitingDuringAdoption();
+    const { s, call } = await adoptionBeginsDuringWait();
     s.healthy = true;
     await vi.advanceTimersByTimeAsync(250);
     expect(s.record).toEqual({ pid: 777, port: 8181 });
@@ -1894,5 +1904,153 @@ describe("ServerManager forgetting a server", () => {
     expect(adopting.state).toBe("resolved"); expect(s.killed).toEqual(killed); expect(s.record).toEqual(other);
     m.stopIfOwned();
     expect(s.killed).toEqual(killed); expect(s.record).toEqual(other);
+  });
+});
+
+describe("ServerManager starting while an adoption is in progress", () => {
+  const SERVER_CMD = "node /x/dist/cli/qmd.js mcp --http --port 8181";
+  const saved = { pid: 777, port: 8181 };
+
+  /** A manager with a record of a live server, pid 777, that is the plugin's by its command line and does not answer health yet. */
+  function recorded(over: Partial<FakeOptions> = {}): { m: ServerManager; s: FakeState } {
+    const { deps, s } = fake({ healthy: false, healthyAfterPolls: 1, record: saved, alive: [777], cmd: SERVER_CMD, spawnPid: 5151, ...over });
+    return { m: new ServerManager(deps), s };
+  }
+
+  it("asks nothing and spawns nothing until the adoption has settled, and uses the server it adopts", async () => {
+    const { m, s } = recorded();
+    const adopting = watch(m.adoptIfOurs());
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.healthCalls).toBe(5); // the adoption's own, every 250 ms: the start has not asked
+    expect(s.spawned).toEqual([]); expect(call.state).toBe("pending"); expect(adopting.state).toBe("pending");
+    s.healthy = true; // the recorded server answers after all
+    await vi.advanceTimersByTimeAsync(250);
+    expect(adopting.state).toBe("resolved"); expect(call.state).toBe("resolved");
+    expect(s.spawned).toEqual([]); expect(s.killed).toEqual([]); expect(s.record).toEqual(saved);
+    expect(onStatus).not.toHaveBeenCalled();
+    // It is owned: its idle timer, started when it was adopted, stops it.
+    await vi.advanceTimersByTimeAsync(60 * MIN - 1);
+    expect(s.killed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.killed).toEqual([[777, "SIGTERM"]]); expect(s.record).toBeNull(); expect(s.spawned).toEqual([]);
+  });
+  it("waits for the adoption to stop a recorded server that never answers, then for that group to be gone, and spawns once", async () => {
+    const { m, s } = recorded({ diesOn: "SIGKILL" });
+    const adopting = watch(m.adoptIfOurs());
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(s.events).toEqual([]); expect(call.state).toBe("pending"); expect(onStatus).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(adopting.state).toBe("resolved"); expect(s.events).toEqual(["SIGTERM 777"]); expect(s.record).toBeNull();
+    // Only now does the start find that nothing answers, and that there is a group to wait for.
+    expect(onStatus).toHaveBeenCalledTimes(1); expect(onStatus).toHaveBeenCalledWith("starting");
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(s.events).toEqual(["SIGTERM 777"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual(["SIGTERM 777", "SIGKILL 777", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.spawned).toHaveLength(1); expect(onStatus).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    ["names another program", { cmd: "vim notes.md" }],
+    ["names a group that is gone", { alive: [] }],
+    ["is for another port", { record: { pid: 777, port: 9000 } }],
+    ["has a PID that cannot be signalled", { record: { pid: 1, port: 8181 } }],
+  ])("starts as usual once the adoption has cleared a record that %s", async (_name, over) => {
+    const { m, s } = recorded(over);
+    const adopting = watch(m.adoptIfOurs());
+    const call = watch(m.ensureRunning());
+    await flush();
+    expect(adopting.state).toBe("resolved"); expect(s.record).toBeNull();
+    expect(s.events).toEqual(["spawn 5151"]); expect(s.healthCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    expect(s.killed).toEqual([]);
+  });
+  it("starts as usual when the adoption found no record", async () => {
+    const { m, s } = recorded({ record: null });
+    const adopting = watch(m.adoptIfOurs());
+    const call = watch(m.ensureRunning());
+    await flush();
+    expect(adopting.state).toBe("resolved"); expect(s.events).toEqual(["spawn 5151"]); expect(s.healthCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved");
+  });
+  it.each(INTERRUPTIONS)("%s while a start waits for the adoption ends the start without a health check or a spawn", async (name) => {
+    const { m, s } = recorded();
+    const adopting = watch(m.adoptIfOurs());
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    const asked = s.healthCalls;
+    interruptions[name].act(m);
+    await flush();
+    expect(call.state).toBe("rejected");
+    expect(call.error).toMatchObject({ kind: "server-start", message: interruptions[name].message });
+    expect(adopting.state).toBe("resolved"); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.healthCalls).toBe(asked); expect(s.spawned).toEqual([]); expect(s.killed).toEqual([]);
+    expect(s.record).toEqual(saved);
+  });
+  it("shares the wait for the adoption between callers, and says it is starting to none of them until it is", async () => {
+    const { m, s } = recorded({ diesOn: "SIGTERM" });
+    void m.adoptIfOurs();
+    const [early, late] = [vi.fn(), vi.fn()];
+    const first = watch(m.ensureRunning(early));
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = watch(m.ensureRunning(late));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(s.healthCalls).toBe(12); // all the adoption's
+    expect(early).not.toHaveBeenCalled(); expect(late).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    // The adoption stops the hung server, whose group goes at once: one health check and one spawn for both callers.
+    expect(s.events).toEqual(["SIGTERM 777", "spawn 5151"]); expect(s.healthCalls).toBe(13);
+    for (const onStatus of [early, late]) expect(onStatus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(first.state).toBe("resolved"); expect(second.state).toBe("resolved");
+    expect(s.spawned).toHaveLength(1); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("goes on with the start when the adoption fails", async () => {
+    const { m, s } = recorded({ diesOn: "SIGTERM" });
+    const adopting = watch(m.adoptIfOurs());
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(2000);
+    s.saveThrows = true; // the adoption will stop the hung server and then fail to clear its record
+    await vi.advanceTimersByTimeAsync(1000);
+    s.saveThrows = false;
+    expect(adopting.state).toBe("rejected"); expect(s.events).toEqual(["SIGTERM 777", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("checks health in the same tick, with no timer, when no adoption is in progress", async () => {
+    const { m, s } = recorded({ record: null });
+    const call = watch(m.ensureRunning());
+    expect(s.healthCalls).toBe(1); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved");
+  });
+  it("checks health in the same tick, with no timer, when the adoption has settled", async () => {
+    const { m, s } = recorded({ healthy: true });
+    await m.adoptIfOurs();
+    const [asked, timers] = [s.healthCalls, vi.getTimerCount()];
+    const call = watch(m.ensureRunning());
+    expect(s.healthCalls).toBe(asked + 1); expect(vi.getTimerCount()).toBe(timers);
+    await flush();
+    expect(call.state).toBe("resolved"); expect(s.spawned).toEqual([]);
+  });
+  it("still stands an adoption down for a server that a start begun before it has spawned", async () => {
+    const { m, s } = recorded({ healthyAfterPolls: undefined });
+    const call = watch(m.ensureRunning()); // begins first: spawns pid 5151, which is then starting
+    await flush();
+    expect(s.events).toEqual(["spawn 5151"]);
+    await m.adoptIfOurs();
+    expect(s.record).toEqual(saved); expect(s.killed).toEqual([]); expect(vi.getTimerCount()).toBe(2); // the start's poll and limit
+    m.stopIfOwned();
+    await flush();
+    expect(call.state).toBe("rejected"); expect(s.killed).toEqual([[5151, "SIGTERM"]]); expect(s.record).toEqual(saved);
   });
 });
