@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyValueStore } from "../src/config";
-import { Indexer, MODELS_PULLED_KEY, type IndexerDeps } from "../src/indexer";
+import { Indexer, MODELS_PULLED_KEY, type IndexState, type IndexerDeps } from "../src/indexer";
 import type { CliResult } from "../src/qmd-cli";
 
 const fixture = (name: string): string => readFileSync(join(__dirname, "fixtures", name), "utf8");
@@ -10,6 +10,7 @@ const fixture = (name: string): string => readFileSync(join(__dirname, "fixtures
 const OK: CliResult = { code: 0, stdout: "", stderr: "", timedOut: false };
 const QUIET = 300_000;
 const POINTS_ELSEWHERE = 'collection "Main" points at another folder';
+const OTHER_POINTS_ELSEWHERE: IndexState = { kind: "failed", message: 'collection "Other" points at another folder' };
 
 /** Real `qmd collection show` output, with its `Path:` line pointing at `p`. */
 const showWithPath = (p: string): CliResult => ({
@@ -209,6 +210,14 @@ describe("commands", () => {
     const ix = new Indexer(deps); await ix.start();
     expect(ix.getState()).toEqual({ kind: "failed", message: `Couldn't run qmd at "/opt/q md/qmd".` });
   });
+  it("says a command was killed when it has no exit code and wrote no error output", async () => {
+    const silent = fake({ "collection show Main": { ...OK, code: null } });
+    const a = new Indexer(silent.deps); await a.start();
+    expect(a.getState()).toEqual({ kind: "failed", message: "qmd collection show Main failed: killed before it finished" });
+    const withOutput = fake({ "collection show Main": { ...OK, code: null, stderr: "Terminated: 15\n" } });
+    const b = new Indexer(withOutput.deps); await b.start();
+    expect(b.getState()).toEqual({ kind: "failed", message: "qmd collection show Main failed: Terminated: 15" });
+  });
   it("start and runNow settle even when the runner rejects", async () => {
     const { deps } = fake({}, { cli: { run: () => Promise.reject(new Error("spawn exploded")) } });
     const ix = new Indexer(deps);
@@ -243,15 +252,12 @@ describe("collection safety", () => {
   it("never adds a collection under a name that was changed while collection show ran", async () => {
     const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
     const gate = deferred<CliResult>();
-    const { deps, calls } = fake(
-      { "collection show Main": gate.promise, "collection show Other": SHOW_OK },
-      { getSettings: () => settings });
+    const { deps, calls } = fake({ "collection show Main": gate.promise }, { getSettings: () => settings });
     const ix = new Indexer(deps);
     const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
     expect(calls).toEqual([["collection", "show", "Main"]]);
     settings.collectionName = "Other"; gate.resolve(SHOW_MISSING); await run;
-    expect(calls.filter((c) => c[1] === "add")).toEqual([]);
-    expect(calls.at(-1)).toEqual(["embed", "-c", "Other"]);
+    expect(calls).toEqual([["collection", "show", "Main"]]);
   });
   it("a run that finds the collection pointing elsewhere stops there, and search is no longer ready", async () => {
     const { deps, calls, script } = fake({ "collection show Main": SHOW_OK });
@@ -327,17 +333,126 @@ describe("readiness", () => {
     await vi.advanceTimersByTimeAsync(QUIET);
     expect(calls).toHaveLength(2);
   });
-  it("a run for the old name that finishes after a rename does not make search ready", async () => {
+  it("a check that finds the vault's collection clears an earlier failure at once", async () => {
+    const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
+    const { deps } = fake(
+      { "collection show Main": showWithPath("/other"), "collection show Good": SHOW_OK },
+      { getSettings: () => settings });
+    const ix = new Indexer(deps); await ix.start();
+    expect(ix.getState()).toEqual({ kind: "failed", message: POINTS_ELSEWHERE });
+    const seen: IndexState[] = [];
+    ix.onChange((s) => seen.push(s));
+    settings.collectionName = "Good"; await ix.start();
+    expect(ix.getState()).toEqual({ kind: "idle" });
+    expect(await ix.whenReady()).toBe(true);
+    expect(seen).toEqual([{ kind: "idle" }]);
+  });
+  it("a check that clears a failure keeps the time of the last completed run, and otherwise says nothing", async () => {
+    const { deps, script } = fake({ "collection show Main": SHOW_OK });
+    const ix = new Indexer(deps); const seen: string[] = [];
+    ix.onChange((s) => seen.push(s.kind));
+    await ix.start();
+    expect(seen).toEqual([]);
+    await ix.runNow();
+    const indexed = ix.getState();
+    expect(indexed).toEqual({ kind: "idle", lastIndexedAt: deps.now() });
+    await vi.advanceTimersByTimeAsync(1000);
+    script.update = { ...OK, code: 1, stderr: "disk I/O error\n" }; await ix.runNow();
+    expect(ix.getState().kind).toBe("failed");
+    await ix.start();
+    expect(ix.getState()).toEqual(indexed);
+    expect(seen.slice(-2)).toEqual(["failed", "idle"]);
+  });
+});
+
+describe("a collection rename during a run", () => {
+  it("stops the run; the failed check for the new name stays in place", async () => {
+    const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
+    const gate = deferred<CliResult>();
+    const { deps, calls } = fake(
+      { "collection show Main": SHOW_OK, update: gate.promise, "collection show Other": showWithPath("/other") },
+      { getSettings: () => settings });
+    const ix = new Indexer(deps); await ix.start();
+    const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
+    expect(calls.at(-1)).toEqual(["update"]);
+    settings.collectionName = "Other"; await ix.start();
+    expect(ix.getState()).toEqual(OTHER_POINTS_ELSEWHERE);
+    const issued = calls.length;
+    gate.resolve(OK); await run; await vi.runAllTimersAsync();
+    expect(calls.slice(issued)).toEqual([]);
+    expect(ix.getState()).toEqual(OTHER_POINTS_ELSEWHERE);
+    expect(await ix.whenReady()).toBe(false);
+  });
+  it("stops the run; a missing new name then gets exactly one run of its own", async () => {
+    const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
+    const gate = deferred<CliResult>();
+    const { deps, calls } = fake(
+      { "collection show Main": SHOW_OK, update: gate.promise, "collection show Other": SHOW_MISSING },
+      { getSettings: () => settings });
+    const ix = new Indexer(deps); await ix.start();
+    const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
+    expect(calls.at(-1)).toEqual(["update"]);
+    settings.collectionName = "Other"; await ix.start();
+    const issued = calls.length;
+    gate.resolve(OK); await run; await vi.runAllTimersAsync();
+    expect(calls.slice(issued)).toEqual([
+      ["collection", "show", "Other"],
+      ["collection", "add", "/vault", "--name", "Other"],
+      ["update"],
+      ["embed", "-c", "Other"],
+    ]);
+    expect(ix.getState()).toEqual({ kind: "idle", lastIndexedAt: deps.now() });
+    expect(await ix.whenReady()).toBe(true);
+  });
+  it.each<[string, true | undefined]>([
+    ["collection add /vault --name Main", undefined],
+    ["pull", true],
+    ["embed -c Main", true],
+  ])("stops the run after '%s': no further command, state or readiness", async (held, modelsPulled) => {
+    const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
+    const gate = deferred<CliResult>();
+    const { deps, calls, store } = fake(
+      { "collection show Main": SHOW_MISSING, [held]: gate.promise, "collection show Other": showWithPath("/other") },
+      { getSettings: () => settings });
+    const ix = new Indexer(deps);
+    const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
+    expect(calls.at(-1)).toEqual(held.split(" "));
+    settings.collectionName = "Other"; await ix.start();
+    const issued = calls.length;
+    gate.resolve(OK); await run; await vi.runAllTimersAsync();
+    expect(calls.slice(issued)).toEqual([]);
+    expect(ix.getState()).toEqual(OTHER_POINTS_ELSEWHERE);
+    expect(await ix.whenReady()).toBe(false);
+    // A download that finished is remembered even though the run stopped straight after it.
+    expect(store.get(MODELS_PULLED_KEY)).toBe(modelsPulled);
+  });
+  it("keeps a failure of the old run's command to itself", async () => {
     const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
     const gate = deferred<CliResult>();
     const { deps } = fake(
-      { "collection show Main": SHOW_OK, "embed -c Main": gate.promise, "collection show Other": showWithPath("/other") },
+      { "collection show Main": SHOW_OK, update: gate.promise, "collection show Other": showWithPath("/other") },
       { getSettings: () => settings });
     const ix = new Indexer(deps); await ix.start();
     const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
     settings.collectionName = "Other"; await ix.start();
-    gate.resolve(OK); await run;
-    expect(await ix.whenReady()).toBe(false);
+    gate.resolve({ ...OK, code: 1, stderr: "disk I/O error\n" }); await run;
+    expect(ix.getState()).toEqual(OTHER_POINTS_ELSEWHERE);
+  });
+  it("to a collection that exists: search is ready at once and the catch-up run uses the new name", async () => {
+    const settings = { collectionName: "Main", reindexQuietMinutes: 5, qmdPath: "qmd" };
+    const gate = deferred<CliResult>();
+    const { deps, calls } = fake(
+      { "collection show Main": SHOW_OK, update: gate.promise, "collection show Good": SHOW_OK },
+      { getSettings: () => settings });
+    const ix = new Indexer(deps); await ix.start();
+    const run = ix.runNow(); await vi.advanceTimersByTimeAsync(0);
+    settings.collectionName = "Good"; await ix.start();
+    expect(await ix.whenReady()).toBe(true);
+    expect(ix.getState()).toEqual({ kind: "running", step: "update" });
+    const issued = calls.length;
+    gate.resolve(OK); await run; await vi.advanceTimersByTimeAsync(QUIET);
+    expect(calls.slice(issued)).toEqual([["collection", "show", "Good"], ["update"], ["embed", "-c", "Good"]]);
+    expect(ix.getState()).toEqual({ kind: "idle", lastIndexedAt: deps.now() });
   });
 });
 

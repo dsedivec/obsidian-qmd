@@ -50,7 +50,9 @@ function messageOf(error: unknown): string {
  * at another folder is left exactly as it is.
  */
 export class Indexer {
-  private state: IndexState = { kind: "idle" };
+  /** The idle state to publish: it carries the time of the last completed run, once there is one. */
+  private idleState: IndexState = { kind: "idle" };
+  private state: IndexState = this.idleState;
   private readonly listeners = new Set<(state: IndexState) => void>();
   /** Whether search is allowed: the configured collection is this vault's and has been indexed. */
   private ready = false;
@@ -130,6 +132,8 @@ export class Indexer {
     if (!this.isConfigured(name)) return;
     if (found === "here") {
       this.ready = true;
+      // A failure reported earlier, for this name or a previous one, no longer holds.
+      if (this.state.kind === "failed") this.setState(this.idleState);
       this.markDirty(); // catches up on changes made while Obsidian was closed
     } else if (found === "missing") {
       void this.runNow();
@@ -152,35 +156,42 @@ export class Indexer {
     return run;
   }
 
+  /**
+   * A run belongs to the collection name it starts with. Once the setting holds another
+   * name, the run stops after the command in flight: it starts nothing more, so nothing
+   * is ever added under a name that is no longer configured, and it leaves the state and
+   * the ready flag to the start() check for the new name.
+   */
   private async run(): Promise<void> {
+    const name = this.deps.getSettings().collectionName;
+    const renamed = (): boolean => !this.isConfigured(name);
     try {
       this.enter("setup");
-      // The name can be changed while `collection show` runs. Only an answer about the
-      // name configured right now is acted on, so nothing is ever added under a stale one.
-      let name: string;
-      let found: Found;
-      do {
-        name = this.deps.getSettings().collectionName;
-        found = await this.locate(name);
-      } while (!this.isConfigured(name));
+      const found = await this.locate(name);
+      if (renamed()) return;
       if (found !== "here") this.ready = false;
       if (found === "elsewhere") throw new Error(pointsElsewhere(name));
       if (found === "missing") {
         await this.qmd(["collection", "add", this.deps.vaultPath, "--name", name], ADD_TIMEOUT_MS);
+        if (renamed()) return;
       }
       if (this.deps.store.get(MODELS_PULLED_KEY) !== true) {
         this.enter("models");
         await this.qmd(["pull"], PULL_TIMEOUT_MS);
         this.deps.store.set(MODELS_PULLED_KEY, true);
+        if (renamed()) return;
       }
       this.enter("update");
       await this.qmd(["update"], UPDATE_TIMEOUT_MS);
+      if (renamed()) return;
       this.enter("embed");
       await this.qmd(["embed", "-c", name], EMBED_TIMEOUT_MS);
-      if (this.isConfigured(name)) this.ready = true;
-      this.setState({ kind: "idle", lastIndexedAt: this.deps.now() });
+      if (renamed()) return;
+      this.ready = true;
+      this.idleState = { kind: "idle", lastIndexedAt: this.deps.now() };
+      this.setState(this.idleState);
     } catch (error) {
-      this.fail(messageOf(error));
+      if (!renamed()) this.fail(messageOf(error));
     }
   }
 
@@ -214,7 +225,8 @@ export class Indexer {
     }
     if (result.timedOut) throw new Error(`${command} timed out`);
     if (result.code !== 0) {
-      throw new Error(`${command} failed: ${lastNonEmptyLine(result.stderr) ?? `exit code ${result.code}`}`);
+      const exit = result.code === null ? "killed before it finished" : `exit code ${result.code}`;
+      throw new Error(`${command} failed: ${lastNonEmptyLine(result.stderr) ?? exit}`);
     }
   }
 
