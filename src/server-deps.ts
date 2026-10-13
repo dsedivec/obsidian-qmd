@@ -11,6 +11,8 @@ export const SERVER_RECORD_KEY = "qmd-search-server";
 
 const LOG_TAIL_LINES = 20;
 const PS_TIMEOUT_MS = 2000;
+/** Room for every process's full command line. Past it `ps` fails, and a server cannot be recognised. */
+const PS_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
 /** Resolves true when a QMD server answers `GET /health` on the port within the time allowed. Never rejects. */
 export function checkHealth(port: number, timeoutMs = 1000): Promise<boolean> {
@@ -108,24 +110,42 @@ function logTail(port: number): string {
   }
 }
 
+// `isAlive` and `commandLine` describe the process group that `pid` leads, not the launcher alone.
+// The launcher can die and leave the real server running in its group, and the group is what
+// `killGroup` signals.
+
+/** True while the group led by `pid` has a live member that this user may signal. */
 function isAlive(pid: number): boolean {
+  if (!isOrdinaryPid(pid)) return false;
   try {
-    process.kill(pid, 0);
+    process.kill(-pid, 0);
     return true;
   } catch {
-    // `ESRCH` is no such process. `EPERM` is a process this user may not signal, so not one the plugin started.
+    // `ESRCH` is no such group. `EPERM` is a group this user may not signal, so not the plugin's,
+    // or on macOS one whose only members are zombies, such as an exited launcher not yet reaped.
     return false;
   }
 }
 
+/** The command lines of the live processes in the group led by `pid`, one to a line, or null if there are none. */
 function commandLine(pid: number): string | null {
+  if (!isOrdinaryPid(pid)) return null;
   try {
-    const output = execFileSync("/bin/ps", ["-p", String(pid), "-o", "command="], {
+    // Every process, filtered here: `ps -g` means different things on macOS and Linux. One `-o` for
+    // each column, because some `ps` take everything after an `=` as that column's heading.
+    const output = execFileSync("/bin/ps", ["-A", "-o", "pgid=", "-o", "stat=", "-o", "command="], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: PS_TIMEOUT_MS,
+      maxBuffer: PS_MAX_OUTPUT_BYTES,
     });
-    return output.trim() || null;
+    const commands: string[] = [];
+    for (const row of output.split("\n")) {
+      const match = /^\s*(\d+)\s+(\S+)\s+(.*\S)\s*$/.exec(row);
+      // A state that starts with Z is a zombie: exited, and not a live member.
+      if (match && Number(match[1]) === pid && !match[2].startsWith("Z")) commands.push(match[3]);
+    }
+    return commands.length > 0 ? commands.join("\n") : null;
   } catch {
     return null;
   }

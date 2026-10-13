@@ -25,8 +25,18 @@ async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
 /** Blocks the event loop, so that Node cannot reap a child in the meantime. */
 const sleepSync = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const groupOf = (pid: number): number =>
-  Number(execFileSync("/bin/ps", ["-p", String(pid), "-o", "pgid="], { encoding: "utf8" }));
+/** Like `waitFor`, but it never yields to the event loop. */
+function waitForSync(cond: () => boolean, timeoutMs = 5000): void {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond() && Date.now() < deadline) sleepSync(20);
+  expect(cond()).toBe(true);
+}
+
+const ps = (pid: number, keyword: string): string =>
+  execFileSync("/bin/ps", ["-p", String(pid), "-o", `${keyword}=`], { encoding: "utf8" }).trim();
+const groupOf = (pid: number): number => Number(ps(pid, "pgid"));
+/** True for a process that has exited and has not been reaped. */
+const isZombie = (pid: number): boolean => ps(pid, "stat").startsWith("Z");
 
 const alive = (pid: number): boolean => {
   try {
@@ -184,14 +194,58 @@ describe("server-deps", () => {
       expect(readLog()).toBe(`args:mcp --http --port ${port}\npath:${path}\non stderr\nchild:${child}\n`);
     });
 
-    it("reports the launcher's real command line and whether it is alive", async () => {
-      const { pid, exit } = await spawnLauncher();
+    it("isAlive and commandLine describe the launcher's whole group: the launcher and its child", async () => {
+      const { pid } = await spawnLauncher();
       expect(deps.isAlive(pid)).toBe(true);
-      expect(deps.commandLine(pid)).toContain(`${settings.qmdPath} mcp --http --port ${port}`);
+      expect(deps.commandLine(pid)!.split("\n").sort()).toEqual(
+        [`/bin/sh ${settings.qmdPath} mcp --http --port ${port}`, "sleep 300"].sort(),
+      );
+    });
+
+    it("a group whose launcher has exited is still alive, and shows its child, while the child lives", async () => {
+      fakeQmd('sleep 300 &\necho "child:$!"');
+      const { pid, exit } = spawnServer();
+      // First while the launcher has exited and is not yet reaped: nothing up to `await` yields to the event loop.
+      waitForSync(() => isZombie(pid!));
+      leftovers.push(Number(/child:(\d+)/.exec(readLog())![1]));
+      expect(deps.isAlive(pid!)).toBe(true);
+      expect(deps.commandLine(pid!)).toBe("sleep 300");
+      // Then once it has been reaped, and no process has the launcher's PID any more.
+      expect(await exit).toEqual({ code: 0 });
+      expect(alive(pid!)).toBe(false);
+      expect(deps.isAlive(pid!)).toBe(true);
+      expect(deps.commandLine(pid!)).toBe("sleep 300");
+    });
+
+    it("a group that is gone is not alive and has no command line", async () => {
+      const { pid, child, exit } = await spawnLauncher();
       deps.killGroup(pid, "SIGKILL");
       await exit;
+      await waitFor(() => !alive(child));
       expect(deps.isAlive(pid)).toBe(false);
       expect(deps.commandLine(pid)).toBeNull();
+    });
+
+    it("a group that is only an exited, unreaped launcher is not alive and has no command line", () => {
+      fakeQmd("exit 0");
+      const { pid } = spawnServer();
+      waitForSync(() => isZombie(pid!));
+      expect(deps.isAlive(pid!)).toBe(false);
+      expect(deps.commandLine(pid!)).toBeNull();
+    });
+
+    // Negated for the group, 0 is this process's own group and 1 is every process.
+    it("isAlive is false and commandLine null, with nothing signalled, for a PID that is not an integer above 1", () => {
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+      try {
+        for (const pid of [0, 1, -3, 1.5, Number.NaN]) {
+          expect(deps.isAlive(pid)).toBe(false);
+          expect(deps.commandLine(pid)).toBeNull();
+        }
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
     });
 
     it("makes the launcher the leader of a process group of its own, which holds its child", async () => {
@@ -214,8 +268,7 @@ describe("server-deps", () => {
       fakeQmd("exit 0");
       const { pid } = spawnServer();
       // macOS answers EPERM, not ESRCH, for a group whose only members are zombies.
-      for (let i = 0; i < 250 && deps.commandLine(pid!) !== "<defunct>"; i++) sleepSync(20);
-      expect(deps.commandLine(pid!)).toBe("<defunct>");
+      waitForSync(() => isZombie(pid!));
       expect(() => deps.killGroup(pid!, "SIGTERM")).not.toThrow();
     });
 

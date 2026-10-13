@@ -48,6 +48,15 @@ function groupAlive(pid: number): boolean {
   }
 }
 
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
@@ -176,6 +185,32 @@ describe("ServerManager with the real qmd", () => {
     await waitFor(() => !groupAlive(pid), 10_000);
     visitor.dispose();
     owner.dispose();
+  });
+
+  // The launcher does not forward signals and the real server does not need it: with the launcher
+  // dead, the server runs on in the launcher's process group, which is what identifies and stops it.
+  it("still recognises and stops a server whose launcher has died", async () => {
+    const store = memoryStore();
+    const { manager, deps, spawned } = newManager(store);
+    await manager.ensureRunning();
+    const { pid } = store.get(SERVER_RECORD_KEY) as OwnedRecord;
+
+    // The launcher alone, by its own PID. Waiting for `exit` makes sure that it is gone and reaped.
+    process.kill(pid, "SIGKILL");
+    expect(await Promise.race([spawned[0].exit, sleep(5000, "still pending", { ref: false })])).toEqual({ code: null });
+    expect(processAlive(pid)).toBe(false);
+
+    expect(deps.isAlive(pid)).toBe(true);
+    const commandLine = deps.commandLine(pid);
+    expect(commandLine).toContain("qmd");
+    expect(commandLine).toContain("mcp");
+    expect(await checkHealth(settings.port)).toBe(true);
+
+    manager.stopIfOwned();
+    await waitFor(() => !groupAlive(pid), 10_000);
+    expect(deps.isAlive(pid)).toBe(false);
+    expect(await checkHealth(settings.port)).toBe(false);
+    manager.dispose();
   });
 
   // The plugin takes a server for gone when /health does not answer within a second. That only
