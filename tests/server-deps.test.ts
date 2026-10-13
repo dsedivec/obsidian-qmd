@@ -191,7 +191,7 @@ describe("server-deps", () => {
       exit: SpawnedServer["exit"];
     }> {
       fakeQmd(
-        'echo "args:$*"\necho "path:$PATH"\necho "on stderr" >&2\nsleep 300 &\necho "child:$!"\nwait',
+        'echo "args:$*"\necho "path:$PATH"\necho "cwd:$(pwd)"\necho "on stderr" >&2\nsleep 300 &\necho "child:$!"\nwait',
       );
       const { pid, exit } = spawnServer();
       await waitFor(() => /child:\d+/.test(readLog()));
@@ -234,13 +234,16 @@ describe("server-deps", () => {
       expect(await deps.health(port)).toBe(false);
     });
 
-    it("spawns qmd mcp --http on the port, with the CLI's PATH and its output in a fresh log", async () => {
+    // The working directory is `/` and not this process's own, which is the repository: QMD takes a
+    // `.qmd/index.yml` at or above its working directory for its index.
+    it("spawns qmd mcp --http on the port, from /, with the CLI's PATH and its output in a fresh log", async () => {
       writeFileSync(serverLogPath(port), "left over from the last server\n");
       const { child } = await spawnLauncher();
       const path = cli.env().PATH!;
       expect(path.startsWith(`${dir}:/extra/one:`)).toBe(true);
+      expect(process.cwd()).not.toBe("/");
       expect(readLog()).toBe(
-        `args:mcp --http --port ${port}\npath:${path}\non stderr\nchild:${child}\n`,
+        `args:mcp --http --port ${port}\npath:${path}\ncwd:/\non stderr\nchild:${child}\n`,
       );
     });
 

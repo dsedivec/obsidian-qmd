@@ -3,7 +3,12 @@ import { closeSync, openSync, readFileSync } from "node:fs";
 import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { KeyValueStore, QmdSearchSettings } from "./config";
+import {
+  QMD_WORKING_DIRECTORY,
+  type KeyValueStore,
+  type QmdSearchSettings,
+} from "./config";
+import { isUsablePid, isUsablePort, signalGroup } from "./process-group";
 import type { QmdCli } from "./qmd-cli";
 import type {
   OwnedRecord,
@@ -79,7 +84,7 @@ export function createServerDeps(opts: {
     logTail,
     isAlive,
     commandLine,
-    killGroup,
+    killGroup: signalGroup,
     loadRecord: () => toOwnedRecord(store.get(SERVER_RECORD_KEY)),
     saveRecord: (record) => store.set(SERVER_RECORD_KEY, record),
   };
@@ -114,6 +119,7 @@ function spawnServer(
       getSettings().qmdPath,
       ["mcp", "--http", "--port", String(port)],
       {
+        cwd: QMD_WORKING_DIRECTORY,
         detached: true,
         stdio: ["ignore", log, log],
         env: cli.env(),
@@ -148,11 +154,11 @@ function logTail(port: number): string {
 
 // `isAlive` and `commandLine` describe the process group that `pid` leads, not the launcher alone.
 // The launcher can die and leave the real server running in its group, and the group is what
-// `killGroup` signals.
+// `killGroup`, which is `signalGroup`, signals.
 
 /** True while the group led by `pid` has a live member that this user may signal. */
 function isAlive(pid: number): boolean {
-  if (!isOrdinaryPid(pid)) return false;
+  if (!isUsablePid(pid)) return false;
   try {
     process.kill(-pid, 0);
     return true;
@@ -165,7 +171,7 @@ function isAlive(pid: number): boolean {
 
 /** The command lines of the live processes in the group led by `pid`, one to a line, or null if there are none. */
 function commandLine(pid: number): string | null {
-  if (!isOrdinaryPid(pid)) return null;
+  if (!isUsablePid(pid)) return null;
   try {
     // Every process, filtered here: `ps -g` means different things on macOS and Linux. One `-o` for
     // each column, because some `ps` take everything after an `=` as that column's heading.
@@ -192,39 +198,9 @@ function commandLine(pid: number): string | null {
   }
 }
 
-function killGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
-  if (!isOrdinaryPid(pid)) return;
-  try {
-    process.kill(-pid, signal);
-  } catch (e) {
-    // `ESRCH` is a group that is gone. macOS answers `EPERM` for a group whose only members are
-    // zombies, such as a launcher that has exited and that Node has not reaped yet. Either way
-    // there is nothing left to signal.
-    const { code } = e as NodeJS.ErrnoException;
-    if (code !== "ESRCH" && code !== "EPERM") throw e;
-  }
-}
-
-/**
- * A PID that a spawned process can have. 0 and 1 are not, and must never reach a group signal:
- * `process.kill(-0)` signals this process's own group, and `process.kill(-1)` every process there is.
- */
-function isOrdinaryPid(pid: unknown): pid is number {
-  return typeof pid === "number" && Number.isInteger(pid) && pid > 1;
-}
-
-function isPort(port: unknown): port is number {
-  return (
-    typeof port === "number" &&
-    Number.isInteger(port) &&
-    port >= 1 &&
-    port <= 65535
-  );
-}
-
 /** The saved value as a record, or null when it is anything but a usable PID and port. */
 function toOwnedRecord(value: unknown): OwnedRecord | null {
   if (typeof value !== "object" || value === null) return null;
   const { pid, port } = value as Record<string, unknown>;
-  return isOrdinaryPid(pid) && isPort(port) ? { pid, port } : null;
+  return isUsablePid(pid) && isUsablePort(port) ? { pid, port } : null;
 }

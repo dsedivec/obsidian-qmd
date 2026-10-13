@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { buildPath } from "./config";
+import { buildPath, QMD_WORKING_DIRECTORY } from "./config";
+import { signalGroup } from "./process-group";
 
 export interface CliResult {
   code: number | null;
@@ -11,15 +12,6 @@ export interface CliResult {
 
 const KILL_GRACE_MS = 2000;
 const SETTLE_GRACE_MS = 1000;
-
-function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid === undefined) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
-  }
-}
 
 export class QmdCli {
   private readonly running = new Set<ChildProcess>();
@@ -49,6 +41,7 @@ export class QmdCli {
       let child: ChildProcess;
       try {
         child = spawn(this.getConfig().qmdPath, args, {
+          cwd: QMD_WORKING_DIRECTORY,
           env: this.env(),
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],
@@ -84,9 +77,9 @@ export class QmdCli {
 
       const timer = setTimeout(() => {
         timedOut = true;
-        signalGroup(child, "SIGTERM");
+        signalGroup(child.pid, "SIGTERM");
         killTimer = setTimeout(() => {
-          signalGroup(child, "SIGKILL");
+          signalGroup(child.pid, "SIGKILL");
           settleTimer = setTimeout(() => finish(null), SETTLE_GRACE_MS);
         }, KILL_GRACE_MS);
       }, opts.timeoutMs);
@@ -106,6 +99,6 @@ export class QmdCli {
   }
 
   killAll(): void {
-    for (const child of this.running) signalGroup(child, "SIGTERM");
+    for (const child of this.running) signalGroup(child.pid, "SIGTERM");
   }
 }

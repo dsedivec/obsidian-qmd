@@ -1,4 +1,5 @@
 import { classifyStartFailure, QmdSearchError } from "./errors";
+import { isUsablePid, isUsablePort } from "./process-group";
 
 export interface OwnedRecord {
   pid: number;
@@ -578,16 +579,6 @@ export class ServerManager {
     )
       this.deps.saveRecord(null);
   }
-}
-
-/** A PID that a group signal may be sent to. One to 0 or 1 would reach this process's own group, or every process. */
-function isUsablePid(pid: number): boolean {
-  return Number.isInteger(pid) && pid > 1;
-}
-
-/** A port a server can listen on. */
-function isUsablePort(port: number): boolean {
-  return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 /** True when the command line passes `--port` with exactly this port as the argument after it. */

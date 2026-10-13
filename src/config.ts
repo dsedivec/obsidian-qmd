@@ -116,6 +116,15 @@ function splitPath(path: string): string[] {
     .filter((p) => p !== "");
 }
 
+/**
+ * The working directory of every `qmd` the plugin starts. QMD takes a project-local index,
+ * `.qmd/index.yml`, in its working directory or in any directory above it, in place of its
+ * default index. A `qmd` that inherited Obsidian's working directory would index and search such
+ * a project's index whenever Obsidian had been started from a shell inside the project. No
+ * directory is above `/`, and it is where Obsidian already runs when it is started from the Dock.
+ */
+export const QMD_WORKING_DIRECTORY = "/";
+
 /** PATH for the spawned qmd: qmd's own directory, the extras, then the inherited PATH, deduplicated. */
 export function buildPath(
   qmdPath: string,
