@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IndexState } from "../src/indexer";
-import { footerText, formatAge, moveSelection, scorePercent, statusText } from "../src/view-model";
+import { folderLabel, footerText, formatAge, moveSelection, scorePercent, statusText } from "../src/view-model";
 
 const NOW = 10_000_000;
 const idle = (agoMs?: number): IndexState => ({ kind: "idle", lastIndexedAt: agoMs === undefined ? undefined : NOW - agoMs });
@@ -34,4 +34,7 @@ describe("view-model", () => {
 
   it.each([[0.93, "93%"], [0.005, "1%"], [1, "100%"], [1.7, "100%"], [-1, "0%"], [NaN, "0%"]])(
     "scorePercent(%j) is %s", (score, text) => expect(scorePercent(score)).toBe(text));
+
+  it.each([["Daily", "Daily"], ["Projects/Platform", "Projects / Platform"], ["a/b c/d", "a / b c / d"], ["", ""]])(
+    "folderLabel(%j) is %j", (folder, text) => expect(folderLabel(folder)).toBe(text));
 });

@@ -47,6 +47,11 @@ export function moveSelection(current: number | null, key: "ArrowUp" | "ArrowDow
   return current - 1;
 }
 
+/** A note's folder as shown under its title: "Projects/Platform" reads "Projects / Platform". */
+export function folderLabel(folder: string): string {
+  return folder.split("/").join(" / ");
+}
+
 export function scorePercent(score: number): string {
   const pct = Number.isNaN(score) ? 0 : Math.min(100, Math.max(0, Math.round(score * 100)));
   return `${pct}%`;

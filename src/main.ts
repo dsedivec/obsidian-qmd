@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { Notice, Plugin, TFile, type FileSystemAdapter, type TAbstractFile } from "obsidian";
+import { Notice, Plugin, TFile, type FileSystemAdapter, type PaneType, type TAbstractFile } from "obsidian";
 import { CLI_COMMAND, CLI_DESCRIPTION, CLI_FLAGS, createCliHandler } from "./cli-handler";
 import { isValidCollectionName, sanitizeSettings, type KeyValueStore, type QmdSearchSettings } from "./config";
 import { describeError, type ErrorView } from "./errors";
@@ -12,6 +12,7 @@ import { SearchService } from "./search-service";
 import { createServerDeps } from "./server-deps";
 import { ServerManager } from "./server-manager";
 import { QmdSearchSettingTab } from "./settings";
+import { SearchView, VIEW_TYPE } from "./view";
 
 /** A value may be as raw as the text of a settings field: every one is sanitised before it becomes a setting. */
 type SettingsPatch = { [K in keyof QmdSearchSettings]?: unknown };
@@ -75,6 +76,9 @@ export default class QmdSearchPlugin extends Plugin {
     });
 
     this.addSettingTab(new QmdSearchSettingTab(this.app, this));
+    // Registered once the units exist: a pane left open is rebuilt at once, and reads them.
+    this.registerView(VIEW_TYPE, (leaf) => new SearchView(leaf, this));
+    this.addCommand({ id: "search", name: "Search", callback: () => this.activateView() });
     this.addCommand({ id: "reindex", name: "Reindex vault now", callback: () => this.reindex() });
     this.registerCliHandler(
       CLI_COMMAND,
@@ -145,6 +149,33 @@ export default class QmdSearchPlugin extends Plugin {
   /** `describeError` with the current QMD path and port. */
   describe(err: unknown): ErrorView {
     return describeError(err, this.settings);
+  }
+
+  /** Shows the search pane, opening it in the right sidebar if there is none, and puts the cursor in its input. */
+  async activateView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE).at(0);
+    if (leaf === undefined) {
+      const created = workspace.getRightLeaf(false);
+      if (created === null) return;
+      await created.setViewState({ type: VIEW_TYPE, active: true });
+      leaf = created;
+    }
+    // Also loads the view of a leaf that Obsidian has deferred, so that it is a SearchView below.
+    await workspace.revealLeaf(leaf);
+    if (leaf.view instanceof SearchView) leaf.view.focusInput();
+  }
+
+  /** Opens the note at the result's line. `focus` false leaves the keyboard where it is. */
+  async openResult(result: SearchResult, opts: { newLeaf: PaneType | boolean; focus: boolean }): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(result.path);
+    if (!(file instanceof TFile)) {
+      new Notice("QMD: " + result.path + " no longer exists.");
+      return;
+    }
+    await this.app.workspace
+      .getLeaf(opts.newLeaf)
+      .openFile(file, { active: opts.focus, eState: { line: result.line - 1 } });
   }
 
   private async reindex(): Promise<void> {
