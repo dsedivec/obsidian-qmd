@@ -4,4 +4,5 @@ case "$1" in
   fail) echo "boom" >&2; exit 3 ;;
   path) echo "$PATH" ;;
   hang) sleep 300 & echo "child:$!"; wait ;;
+  stubborn) (trap '' TERM; sleep 300) & echo "child:$!"; exit 0 ;;
 esac

@@ -49,4 +49,25 @@ describe("QmdCli", () => {
     c.killAll();
     expect((await pending).code).toBeNull();
   });
+  it("resolves instead of rejecting when spawn throws", async () => {
+    expect(await cli("").run(["echo"], T)).toMatchObject({ code: null, stdout: "", stderr: "", timedOut: false, errorCode: "ERR_INVALID_ARG_VALUE" });
+    expect(await cli().run(["echo", "a\0b"], T)).toMatchObject({ code: null, timedOut: false, errorCode: "ERR_INVALID_ARG_VALUE" });
+  });
+  it("resolves instead of rejecting when getConfig throws", async () => {
+    const plain = new QmdCli(() => {
+      throw new Error("bad config");
+    });
+    expect(await plain.run(["echo"], T)).toMatchObject({ code: null, timedOut: false, errorCode: "ECONFIG" });
+    const coded = new QmdCli(() => {
+      throw Object.assign(new Error("x"), { code: "EWHATEVER" });
+    });
+    expect(await coded.run(["echo"], T)).toMatchObject({ code: null, errorCode: "EWHATEVER" });
+  });
+  it("settles after a timeout even when a grandchild ignoring SIGTERM holds the pipes", async () => {
+    const result = await cli().run(["stubborn"], { timeoutMs: 300 });
+    expect(result.timedOut).toBe(true);
+    const child = Number(/child:(\d+)/.exec(result.stdout)![1]);
+    await sleep(300);
+    expect(alive(child)).toBe(false);
+  }, 8000);
 });

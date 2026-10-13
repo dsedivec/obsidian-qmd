@@ -10,6 +10,7 @@ export interface CliResult {
 }
 
 const KILL_GRACE_MS = 2000;
+const SETTLE_GRACE_MS = 1000;
 
 function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   if (child.pid === undefined) return;
@@ -36,15 +37,22 @@ export class QmdCli {
       let stderr = "";
       let timedOut = false;
       let errorCode: string | undefined;
-      let exited = false;
       let settled = false;
       let killTimer: NodeJS.Timeout | undefined;
+      let settleTimer: NodeJS.Timeout | undefined;
 
-      const child = spawn(this.getConfig().qmdPath, args, {
-        env: this.env(),
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      let child: ChildProcess;
+      try {
+        child = spawn(this.getConfig().qmdPath, args, {
+          env: this.env(),
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException | undefined)?.code;
+        resolve({ code: null, stdout: "", stderr: "", timedOut: false, errorCode: typeof code === "string" ? code : "ECONFIG" });
+        return;
+      }
       this.running.add(child);
 
       const finish = (code: number | null): void => {
@@ -52,6 +60,7 @@ export class QmdCli {
         settled = true;
         clearTimeout(timer);
         clearTimeout(killTimer);
+        clearTimeout(settleTimer);
         this.running.delete(child);
         resolve({ code, stdout, stderr, timedOut, ...(errorCode ? { errorCode } : {}) });
       };
@@ -60,7 +69,8 @@ export class QmdCli {
         timedOut = true;
         signalGroup(child, "SIGTERM");
         killTimer = setTimeout(() => {
-          if (!exited) signalGroup(child, "SIGKILL");
+          signalGroup(child, "SIGKILL");
+          settleTimer = setTimeout(() => finish(null), SETTLE_GRACE_MS);
         }, KILL_GRACE_MS);
       }, opts.timeoutMs);
 
@@ -69,9 +79,6 @@ export class QmdCli {
       child.on("error", (e: NodeJS.ErrnoException) => {
         errorCode = e.code;
         finish(null);
-      });
-      child.on("exit", () => {
-        exited = true;
       });
       child.on("close", (code) => finish(code));
     });
