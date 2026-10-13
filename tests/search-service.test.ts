@@ -127,19 +127,18 @@ describe("SearchService", () => {
 });
 
 describe("SearchService holding the server", () => {
-  it("takes a hold once the server is running and before it queries", async () => {
+  it("takes its hold before it asks for a running server, and keeps it while the server starts", async () => {
     const d = fake(); const order: string[] = [];
     let running!: () => void;
-    d.server.ensureRunning.mockImplementation(() => new Promise<void>((resolve) => { running = resolve; }));
-    d.server.hold.mockImplementation(() => { order.push("hold"); return () => {}; });
+    d.server.hold.mockImplementation(() => { order.push("hold"); return () => { order.push("release"); }; });
+    d.server.ensureRunning.mockImplementation(() => { order.push("ensureRunning"); return new Promise<void>((resolve) => { running = resolve; }); });
     d.client.query.mockImplementation(async () => { order.push("query"); return []; });
     const searching = new SearchService(d).search("x");
     await settle();
-    expect(d.server.ensureRunning).toHaveBeenCalledTimes(1);
-    expect(d.server.hold).not.toHaveBeenCalled(); // the server is not known to be running yet
+    expect(order).toEqual(["hold", "ensureRunning"]); // held, with the server not yet known to be running
     running();
     await searching;
-    expect(order).toEqual(["hold", "query"]);
+    expect(order).toEqual(["hold", "ensureRunning", "query", "release"]);
   });
   it("keeps the hold while the query is in flight, and releases it once on success", async () => {
     const d = fake();
@@ -153,13 +152,17 @@ describe("SearchService holding the server", () => {
     expect(await searching).toHaveLength(1);
     expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
   });
+  it("releases the hold once when the server cannot be started", async () => {
+    const d = fake(); d.server.ensureRunning.mockRejectedValue(new QmdSearchError("server-start", "x"));
+    await expect(new SearchService(d).search("x")).rejects.toMatchObject({ kind: "server-start" });
+    expect(d.client.query).not.toHaveBeenCalled();
+    expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
+  });
   it.each(["timeout", "tool", "server-response", "connection"] as const)("releases the hold once when the query is rejected with a %s error", async (kind) => {
     const d = fake(); d.client.query.mockRejectedValue(new QmdSearchError(kind, "x"));
     await expect(new SearchService(d).search("x")).rejects.toMatchObject({ kind });
-    // A connection error is retried once, and each attempt has a hold of its own.
-    expect(d.server.hold).toHaveBeenCalledTimes(kind === "connection" ? 2 : 1);
-    expect(d.releases).toHaveLength(kind === "connection" ? 2 : 1);
-    for (const release of d.releases) expect(release).toHaveBeenCalledTimes(1);
+    // One hold for the search, the retry after a connection error included.
+    expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
   });
   it("releases the hold once when the search is aborted with the query in flight", async () => {
     const d = fake(); const c = new AbortController();
@@ -173,7 +176,14 @@ describe("SearchService holding the server", () => {
     await expect(searching).rejects.toMatchObject({ kind: "aborted" });
     expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
   });
-  it("takes and releases a hold of its own for the retry, after its own ensureRunning", async () => {
+  it("releases the hold once when the search is aborted while the server starts", async () => {
+    const d = fake(); const c = new AbortController();
+    d.server.ensureRunning.mockImplementation(async () => { c.abort(); });
+    await expect(new SearchService(d).search("x", { signal: c.signal })).rejects.toMatchObject({ kind: "aborted" });
+    expect(d.client.query).not.toHaveBeenCalled();
+    expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
+  });
+  it("keeps one hold across a retried search, and releases it once at the end", async () => {
     const d = fake(); const order: string[] = [];
     d.server.ensureRunning.mockImplementation(async () => { order.push("ensureRunning"); });
     d.server.hold.mockImplementation(() => { order.push("hold"); return () => { order.push("release"); }; });
@@ -183,7 +193,7 @@ describe("SearchService holding the server", () => {
       return raw("a.md");
     });
     expect(await new SearchService(d).search("x")).toHaveLength(1);
-    expect(order).toEqual(["ensureRunning", "hold", "query", "release", "ensureRunning", "hold", "query", "release"]);
+    expect(order).toEqual(["hold", "ensureRunning", "query", "ensureRunning", "query", "release"]);
   });
   it("releases the hold when the status listener throws before the query is sent", async () => {
     const d = fake();
@@ -192,22 +202,33 @@ describe("SearchService holding the server", () => {
     expect(d.client.query).not.toHaveBeenCalled();
     expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
   });
-  it("takes no hold when the search was aborted while the server started", async () => {
-    const d = fake(); const c = new AbortController();
-    d.server.ensureRunning.mockImplementation(async () => { c.abort(); });
-    await expect(new SearchService(d).search("x", { signal: c.signal })).rejects.toMatchObject({ kind: "aborted" });
-    expect(d.server.hold).not.toHaveBeenCalled();
-  });
-  it("takes no hold when the server cannot be started", async () => {
-    const d = fake(); d.server.ensureRunning.mockRejectedValue(new QmdSearchError("server-start", "x"));
-    await expect(new SearchService(d).search("x")).rejects.toMatchObject({ kind: "server-start" });
-    expect(d.server.hold).not.toHaveBeenCalled();
-  });
   it("has released the hold by the time it notes the activity", async () => {
     const d = fake(); const order: string[] = [];
     d.server.hold.mockImplementation(() => () => { order.push("release"); });
     d.server.noteActivity.mockImplementation(() => { order.push("noteActivity"); });
     await new SearchService(d).search("x");
     expect(order).toEqual(["release", "noteActivity"]);
+  });
+  it("takes no hold for a search it does not run: an empty query, an index that is not ready, a signal already aborted", async () => {
+    const empty = fake();
+    await new SearchService(empty).search("   ");
+    expect(empty.server.hold).not.toHaveBeenCalled();
+    const notReady = fake({ ready: false, state: { kind: "running", step: "embed" } });
+    await new SearchService(notReady).search("x").catch(() => {});
+    expect(notReady.server.hold).not.toHaveBeenCalled();
+    const cancelled = fake(); const c = new AbortController(); c.abort();
+    await new SearchService(cancelled).search("x", { signal: c.signal }).catch(() => {});
+    expect(cancelled.server.hold).not.toHaveBeenCalled();
+  });
+  it("takes no hold while it waits for the index to be ready", async () => {
+    const d = fake();
+    let ready!: (isReady: boolean) => void;
+    d.indexer.whenReady.mockImplementation(() => new Promise<boolean>((resolve) => { ready = resolve; }));
+    const searching = new SearchService(d).search("x");
+    await settle();
+    expect(d.server.hold).not.toHaveBeenCalled();
+    ready(true);
+    await searching;
+    expect(d.server.hold).toHaveBeenCalledTimes(1); expect(d.releases[0]).toHaveBeenCalledTimes(1);
   });
 });

@@ -30,8 +30,11 @@ export interface ServerDeps {
 const POLL_MS = 250;
 const STARTUP_LIMIT_MS = 60_000;
 const KILL_GRACE_MS = 5_000;
-/** How long a start waits for the server it has just stopped to be gone. Longer than `KILL_GRACE_MS`, so that the SIGKILL has landed. */
-const REPLACE_WAIT_MS = 6_000;
+/**
+ * How long after its SIGTERM a stopped group can keep a start on its port waiting. Longer than
+ * `KILL_GRACE_MS`, so that the SIGKILL has landed.
+ */
+const STOPPED_WAIT_MS = 6_000;
 /** How long a recorded server has at load to answer health before it is taken for hung. */
 const ADOPT_WAIT_MS = 3_000;
 const SHUT_DOWN = "The QMD server manager was shut down.";
@@ -40,6 +43,8 @@ const CANCELLED = "The QMD server start was cancelled.";
 type Timer = ReturnType<typeof setTimeout>;
 type StatusListener = (status: "starting") => void;
 type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
+/** A process group this manager has sent SIGTERM: the port it served, and when it was signalled, by `performance.now()`. */
+interface StoppedGroup { pid: number; port: number; at: number }
 
 /**
  * Makes sure a QMD server is reachable and stops only its own.
@@ -54,6 +59,10 @@ type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
  * not signalled either. Every PID here names a process group: the launcher leads it and the
  * server is in it.
  *
+ * It never spawns on a port while a group it has itself sent SIGTERM for that port is still
+ * alive: such a group holds the port, and the new server could not bind it. Every SIGTERM is
+ * remembered in `stopped`, and a start waits for those groups first.
+ *
  * `stopIfOwned` and `dispose` also overtake work that is waiting: on a health answer, for a
  * stopped server to be gone, or for a recorded server to answer. A start does not go on to
  * spawn, and an adoption does not go on to own or to signal. After `dispose` the manager spawns
@@ -64,7 +73,12 @@ export class ServerManager {
   /** The running server this manager spawned or adopted. */
   private owned: OwnedRecord | null = null;
   /** The server this manager spawned that has not answered health yet and has not exited. */
-  private pending: { pid: number | undefined; abort(): void } | null = null;
+  private pending: { pid: number | undefined; port: number; abort(): void } | null = null;
+  /**
+   * The groups this manager has sent SIGTERM and has not yet seen gone or given six seconds. In
+   * memory only: what an earlier session stopped is not known here.
+   */
+  private stopped: StoppedGroup[] = [];
   /** The attempt that `ensureRunning` calls join. */
   private attempt: Promise<void> | null = null;
   /** The callers of that attempt that have yet to hear that it is starting a server, or null once they have. */
@@ -139,7 +153,7 @@ export class ServerManager {
     this.pending = null;
     starting?.abort();
     // Returned by `spawnServer` and not yet exited, so this PID needs no identity check.
-    if (starting?.pid !== undefined) this.terminate(starting.pid);
+    if (starting?.pid !== undefined) this.terminate(starting.pid, starting.port);
     this.stopOwned();
   }
 
@@ -202,14 +216,16 @@ export class ServerManager {
     if (this.disposed || this.stops !== stops) throw this.overtaken();
     if (healthy) return;
     // An owned server that does not answer is stopped and replaced.
-    const stopping = this.stopOwned();
+    this.stopOwned();
     // From here on a caller that joins this attempt is told at once.
     if (this.listeners === listeners) this.listeners = null;
     for (const listener of listeners) listener("starting");
-    if (stopping !== undefined) {
-      // Until that server is gone it holds the port, and a replacement could not bind it. A server
-      // that does not act on SIGTERM goes at the SIGKILL; past that, the spawn is tried anyway.
-      await this.poll(() => !this.deps.isAlive(stopping), REPLACE_WAIT_MS);
+    // A group this manager has stopped holds the port until it is gone, whichever stop it was:
+    // the one just above, the idle timer, `stopIfOwned`, the stop at load, or a failed start. One
+    // that does not act on SIGTERM goes at the SIGKILL; past its six seconds the spawn is tried
+    // anyway. Asked again after each wait, because a group can be stopped during one.
+    for (let wait = this.waitForStopped(port); wait > 0; wait = this.waitForStopped(port)) {
+      await this.poll(() => this.waitForStopped(port) === 0, wait);
       if (this.disposed || this.stops !== stops) throw this.overtaken();
     }
     const server = this.deps.spawnServer(port);
@@ -230,7 +246,7 @@ export class ServerManager {
     // still there; after an exit the server the launcher spawned may be. Either way it is the
     // group `spawnServer` created moments ago, so there is no identity check.
     if (server.pid !== undefined && (outcome === "timeout" || this.deps.isAlive(server.pid))) {
-      this.terminate(server.pid);
+      this.terminate(server.pid, port);
     }
     const tail = this.deps.logTail(port);
     const errorCode = typeof outcome === "object" ? outcome.errorCode : undefined;
@@ -265,7 +281,7 @@ export class ServerManager {
         }, POLL_MS);
       };
       const deadline = setTimeout(() => settle("timeout"), STARTUP_LIMIT_MS);
-      const pending = { pid: server.pid, abort: (): void => settle("stopped") };
+      const pending = { pid: server.pid, port, abort: (): void => settle("stopped") };
       this.pending = pending;
       void server.exit.then((exit) => {
         // A start that `dispose` stopped gives up its PID here too. With the launcher gone there
@@ -312,31 +328,39 @@ export class ServerManager {
     for (const end of [...this.polls]) end();
   }
 
+  /**
+   * How many milliseconds a start on `port` still has to wait for the groups this manager has
+   * stopped there: until the last of them is gone, and for none of them past six seconds from
+   * its SIGTERM. Zero when there is nothing to wait for. A group on another port is never waited
+   * for. Forgets every group, on any port, that is gone or past its six seconds.
+   */
+  private waitForStopped(port: number): number {
+    const now = performance.now();
+    this.stopped = this.stopped.filter((group) => now - group.at < STOPPED_WAIT_MS && this.deps.isAlive(group.pid));
+    const waits = this.stopped.filter((group) => group.port === port).map((group) => group.at + STOPPED_WAIT_MS - now);
+    return Math.max(0, ...waits);
+  }
+
   /** Why a start that `stopIfOwned` or `dispose` overtook fails. */
   private overtaken(): QmdSearchError {
     return new QmdSearchError("server-start", this.disposed ? SHUT_DOWN : CANCELLED);
   }
 
-  /**
-   * Stops the owned server if its PID still looks like a QMD server, and forgets it either way.
-   * Returns the PID it signalled, or undefined when it signalled nothing.
-   */
-  private stopOwned(): number | undefined {
-    return this.owned ? this.stopRecorded(this.owned, "qmd-server") : undefined;
+  /** Stops the owned server if its PID still looks like a QMD server, and forgets it either way. */
+  private stopOwned(): void {
+    if (this.owned) this.stopRecorded(this.owned, "qmd-server");
   }
 
   /**
    * The one way to SIGTERM for a PID that was not spawned moments ago: the owned server's, or at
    * load that of a recorded server which never answered. It is signalled only if it passes the
-   * identity test now, and it is forgotten and its record cleared either way. Returns the PID it
-   * signalled, or undefined when it signalled nothing.
+   * identity test now, and it is forgotten and its record cleared either way.
    */
-  private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-this-port"): number | undefined {
+  private stopRecorded(record: OwnedRecord, identity: "qmd-server" | "on-this-port"): void {
     const ours = identity === "on-this-port" ? this.isServerOnItsPort(record) : this.looksLikeQmdServer(record.pid);
     // Signal before clearing the record: a save that throws must not leave the server running.
-    if (ours) this.terminate(record.pid);
+    if (ours) this.terminate(record.pid, record.port);
     this.forget();
-    return ours ? record.pid : undefined;
   }
 
   /**
@@ -368,9 +392,14 @@ export class ServerManager {
     );
   }
 
-  /** SIGTERM now, SIGKILL five seconds later. Nothing cancels the SIGKILL, `dispose` included. */
-  private terminate(pid: number): void {
+  /**
+   * SIGTERM now, SIGKILL five seconds later. Nothing cancels the SIGKILL, `dispose` included.
+   * Every SIGTERM this manager sends is sent here, so every group it stops is remembered with the
+   * port it served: a start on that port waits for it to be gone.
+   */
+  private terminate(pid: number, port: number): void {
     this.deps.killGroup(pid, "SIGTERM");
+    this.stopped.push({ pid, port, at: performance.now() });
     // Unconditional: `killGroup` does nothing once the whole group is gone.
     setTimeout(() => this.deps.killGroup(pid, "SIGKILL"), KILL_GRACE_MS);
   }

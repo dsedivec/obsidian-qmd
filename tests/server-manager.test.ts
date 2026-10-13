@@ -790,7 +790,9 @@ describe("ServerManager overtaken while it waits for a health answer", () => {
     expect(s.spawned).toEqual([9000]); expect(s.record).toEqual({ pid: 4242, port: 9000 });
   });
   it("gives a call made right after stopIfOwned a fresh attempt when the stopped one had already spawned", async () => {
-    const { deps, s } = fake({ healthy: false });
+    // SIGTERM ends the stopped group at once here. One that lingers is waited for: see
+    // "ServerManager spawning on a port where it has stopped a server".
+    const { deps, s } = fake({ healthy: false, diesOn: "SIGTERM" });
     const m = new ServerManager(deps);
     const first = watch(m.ensureRunning());
     await vi.advanceTimersByTimeAsync(1000);
@@ -1269,16 +1271,19 @@ describe("ServerManager replacing its own server that stopped answering", () => 
     expect(s.events).toEqual([...BEFORE_SPAWN, "spawn 5151"]);
     for (const onStatus of [early, late]) expect(onStatus).toHaveBeenCalledTimes(1);
   });
-  it("gives a call made right after stopIfOwned during the wait a fresh attempt, not the cancelled one", async () => {
+  it("gives a call made right after stopIfOwned during the wait a fresh attempt, which waits for the old group in its turn", async () => {
     const { m, s } = await unresponsive();
     const first = watch(m.ensureRunning());
     await vi.advanceTimersByTimeAsync(1000);
     m.stopIfOwned();
     const onStatus = vi.fn();
     const second = watch(m.ensureRunning(onStatus));
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(first.state).toBe("rejected"); expect(first.error).toMatchObject({ kind: "server-start", message: CANCELLED });
-    expect(second.state).toBe("resolved"); expect(onStatus).toHaveBeenCalledTimes(1);
+    expect(second.state).toBe("pending"); expect(onStatus).toHaveBeenCalledTimes(1); expect(s.events).toEqual(BEFORE_SPAWN);
+    s.alive = [];
+    await vi.advanceTimersByTimeAsync(500);
+    expect(second.state).toBe("resolved");
     expect(s.events).toEqual([...BEFORE_SPAWN, "spawn 5151"]); expect(s.record).toEqual({ pid: 5151, port: 8181 });
   });
 });
@@ -1409,5 +1414,260 @@ describe("ServerManager at load, with a recorded server that does not answer", (
     m.stopIfOwned();
     await vi.advanceTimersByTimeAsync(5000);
     expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("ServerManager spawning on a port where it has stopped a server", () => {
+  const SERVER_CMD = "node /x/dist/cli/qmd.js mcp --http --port 8181";
+  const STOPPED = ["spawn 4242", "SIGTERM 4242"];
+
+  /** Makes the next start find no server answering, and spawn pid 5151, which answers at its first poll. */
+  function nextStart(s: FakeState): void {
+    s.healthy = false; s.healthyAfterPolls = 1; s.spawnPid = 5151;
+  }
+
+  /** A manager whose own server (pid 4242) the idle timer has just sent SIGTERM. */
+  async function idleStopped(over: Partial<FakeOptions> = {}): Promise<{ m: ServerManager; s: FakeState }> {
+    const { m, s } = await started(over);
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.events).toEqual(STOPPED);
+    nextStart(s);
+    return { m, s };
+  }
+
+  it("after an idle-timer stop of a server that does not exit, says it is starting and spawns only once that group is gone", async () => {
+    const { m, s } = await idleStopped();
+    await vi.advanceTimersByTimeAsync(1000);
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    await flush();
+    expect(onStatus).toHaveBeenCalledTimes(1); expect(onStatus).toHaveBeenCalledWith("starting");
+    expect(s.events).toEqual(STOPPED); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(999);
+    expect(s.events).toEqual(STOPPED);
+    s.alive = [];
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    expect(onStatus).toHaveBeenCalledTimes(1);
+  });
+  it("after an idle-timer stop, spawns right after the force-kill when only that ends the group", async () => {
+    const { m, s } = await idleStopped({ diesOn: "SIGKILL" });
+    await vi.advanceTimersByTimeAsync(1000);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(s.events).toEqual(STOPPED); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("after an idle-timer stop, spawns six seconds after the SIGTERM when the group never goes, however late the call came", async () => {
+    const { m, s } = await idleStopped();
+    // Not a multiple of 250 ms after the SIGTERM: the six seconds end between two looks at the group.
+    await vi.advanceTimersByTimeAsync(1100);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(4899);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved");
+  });
+  it("does not wait for a group whose six seconds have passed, alive or not", async () => {
+    const { m, s } = await idleStopped();
+    await vi.advanceTimersByTimeAsync(6000);
+    const call = watch(m.ensureRunning());
+    await flush();
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved");
+  });
+  it("after stopIfOwned, with the stopped group still alive on the same port, waits for it", async () => {
+    const { m, s } = await started();
+    m.stopIfOwned();
+    nextStart(s);
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    await vi.advanceTimersByTimeAsync(749);
+    expect(s.events).toEqual(STOPPED); expect(call.state).toBe("pending");
+    expect(onStatus).toHaveBeenCalledTimes(1); expect(onStatus).toHaveBeenCalledWith("starting");
+    s.alive = [];
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("after stopIfOwned for a port change, does not wait for the group on the old port", async () => {
+    const { m, s } = await started();
+    s.settings.port = 9000;
+    m.stopIfOwned();
+    nextStart(s);
+    const call = watch(m.ensureRunning());
+    await flush();
+    expect(s.events).toEqual([...STOPPED, "spawn 5151"]); expect(s.spawned).toEqual([8181, 9000]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 9000 });
+  });
+  it("waits again for the group on the old port when the port is set back while it is still alive", async () => {
+    const { m, s } = await started();
+    s.settings.port = 9000;
+    m.stopIfOwned();
+    s.settings.port = 8181;
+    nextStart(s);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242", "spawn 5151"]);
+  });
+  it("after stopIfOwned of a server that was still starting, waits for that group", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    nextStart(s);
+    const second = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(first.state).toBe("rejected"); expect(s.events).toEqual(STOPPED); expect(second.state).toBe("pending");
+    s.alive = [];
+    await vi.advanceTimersByTimeAsync(250);
+    expect(s.events).toEqual([...STOPPED, "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(second.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("after a start that ran out of time, a new start waits for the group it gave up on", async () => {
+    const { deps, s } = fake({ healthy: false, diesOn: "SIGKILL" });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(first.state).toBe("rejected"); expect(s.events).toEqual(STOPPED);
+    nextStart(s);
+    const second = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(s.events).toEqual(STOPPED); expect(second.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(second.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("after a start whose launcher exited and left its group behind, a new start waits for that group", async () => {
+    const { deps, s } = fake({ healthy: false, groupSurvivesExit: true, diesOn: "SIGKILL" });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    s.exit({ code: 1 });
+    await flush();
+    expect(first.state).toBe("rejected"); expect(s.events).toEqual(STOPPED);
+    nextStart(s);
+    const second = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(s.events).toEqual(STOPPED); expect(second.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242", "spawn 5151"]);
+  });
+  it("in the five seconds after a hung recorded server is stopped at load, waits for it, then spawns, and the call succeeds", async () => {
+    const { deps, s } = fake({ healthy: false, healthyAfterPolls: 1, record: { pid: 777, port: 8181 }, alive: [777], cmd: SERVER_CMD, diesOn: "SIGKILL" });
+    const m = new ServerManager(deps);
+    const adopting = watch(m.adoptIfOurs());
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(adopting.state).toBe("resolved"); expect(s.events).toEqual(["SIGTERM 777"]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(1000);
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(s.events).toEqual(["SIGTERM 777"]); expect(call.state).toBe("pending");
+    expect(onStatus).toHaveBeenCalledTimes(1); expect(onStatus).toHaveBeenCalledWith("starting");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual(["SIGTERM 777", "SIGKILL 777", "spawn 4242"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 4242, port: 8181 });
+  });
+
+  /** Pid 4242, spawned and stopped while starting, gets SIGTERM at 1 s; the hung recorded server, pid 777, gets it at 4 s. */
+  async function twoStopped(over: Partial<FakeOptions> = {}): Promise<{ m: ServerManager; s: FakeState }> {
+    const { deps, s } = fake({ healthy: false, record: { pid: 777, port: 8181 }, alive: [777], cmd: SERVER_CMD, ...over });
+    const m = new ServerManager(deps);
+    watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    void m.adoptIfOurs();
+    nextStart(s);
+    return { m, s };
+  }
+
+  it("with two groups stopped on the port, spawns only when the second of them is gone", async () => {
+    const { m, s } = await twoStopped({ diesOn: "SIGKILL" });
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777"]);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242", "SIGKILL 777", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved"); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it("with a second group stopped on the port during the wait, waits six seconds from that one's SIGTERM too", async () => {
+    const { m, s } = await twoStopped();
+    await vi.advanceTimersByTimeAsync(500);
+    const call = watch(m.ensureRunning()); // 1.5 s in: only pid 4242 has been stopped so far
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777"]);
+    await vi.advanceTimersByTimeAsync(3000); // 7 s in: six seconds since pid 4242 got SIGTERM
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242"]); expect(call.state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242", "SIGKILL 777"]);
+    await vi.advanceTimersByTimeAsync(1); // 10 s in: six seconds since pid 777 got SIGTERM
+    expect(s.events).toEqual([...STOPPED, "SIGTERM 777", "SIGKILL 4242", "SIGKILL 777", "spawn 5151"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(call.state).toBe("resolved");
+  });
+  it("forgets a group once it has seen it gone: the same PID alive again later holds nothing up", async () => {
+    const { m, s } = await started({ diesOn: "SIGTERM" });
+    m.stopIfOwned();
+    nextStart(s);
+    const second = m.ensureRunning();
+    await vi.advanceTimersByTimeAsync(250);
+    await second;
+    s.alive.push(4242); // the PID belongs to some other process now
+    m.stopIfOwned();
+    nextStart(s); s.spawnPid = 6161;
+    const third = watch(m.ensureRunning());
+    await flush();
+    expect(s.events).toEqual([...STOPPED, "spawn 5151", "SIGTERM 5151", "spawn 6161"]);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(third.state).toBe("resolved"); expect(s.record).toEqual({ pid: 6161, port: 8181 });
+  });
+  it.each(INTERRUPTIONS)("%s during the wait after an idle-timer stop ends the start without spawning", async (name) => {
+    const { m, s } = await idleStopped();
+    await vi.advanceTimersByTimeAsync(1000);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    interruptions[name].act(m);
+    await flush();
+    expect(call.state).toBe("rejected");
+    expect(call.error).toMatchObject({ kind: "server-start", message: interruptions[name].message });
+    expect(s.events).toEqual(STOPPED); expect(vi.getTimerCount()).toBe(1); // the force-kill of the stopped server
+    s.alive = [];
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.events).toEqual([...STOPPED, "SIGKILL 4242"]); expect(s.record).toBeNull();
+  });
+  it("shares the wait between callers", async () => {
+    const { m, s } = await idleStopped();
+    const [early, late] = [vi.fn(), vi.fn()];
+    const first = watch(m.ensureRunning(early));
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = watch(m.ensureRunning(late));
+    expect(late).toHaveBeenCalledTimes(1); expect(late).toHaveBeenCalledWith("starting");
+    s.alive = [];
+    await vi.advanceTimersByTimeAsync(500);
+    expect(first.state).toBe("resolved"); expect(second.state).toBe("resolved");
+    expect(s.events).toEqual([...STOPPED, "spawn 5151"]);
+    for (const onStatus of [early, late]) expect(onStatus).toHaveBeenCalledTimes(1);
   });
 });

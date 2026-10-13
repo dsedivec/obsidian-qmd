@@ -46,23 +46,23 @@ export class SearchService {
     const attempt = async () => {
       await server.ensureRunning(onStatus);
       if (signal?.aborted) throw aborted();
-      // The server is in use until the query has its answer: its idle timer must not stop it meanwhile.
-      const release = server.hold();
-      try {
-        onStatus?.("searching");
-        // Awaited here, so that the hold lasts for the whole of the query.
-        return await client.query(query, { collection: settings.collectionName, limit: wanted * 2, signal });
-      } finally {
-        release();
-      }
+      onStatus?.("searching");
+      return client.query(query, { collection: settings.collectionName, limit: wanted * 2, signal });
     };
 
+    // The server is in use from before it is asked for until the search has its answer, the retry
+    // included: the idle timer must not stop it in between, not even while its health is checked.
+    const release = server.hold();
     let raw;
     try {
-      raw = await attempt();
-    } catch (err) {
-      if (!(err instanceof QmdSearchError) || err.kind !== "connection") throw err;
-      raw = await attempt();
+      try {
+        raw = await attempt();
+      } catch (err) {
+        if (!(err instanceof QmdSearchError) || err.kind !== "connection") throw err;
+        raw = await attempt();
+      }
+    } finally {
+      release();
     }
 
     const results = toSearchResults(raw, settings.collectionName)
