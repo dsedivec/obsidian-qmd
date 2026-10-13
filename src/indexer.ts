@@ -1,4 +1,5 @@
 import type { QmdSearchSettings } from "./config";
+import { cannotRunText } from "./errors";
 import type { CliResult } from "./qmd-cli";
 
 export type IndexState =
@@ -241,18 +242,16 @@ export class Indexer {
   private assertSucceeded(args: string[], result: CliResult): void {
     const command = `qmd ${args.join(" ")}`;
     const { errorCode } = result;
-    if (errorCode === "ENOENT" || errorCode === "EACCES") {
+    // Not started at all. Said as such, with the path: "killed before it finished" would point
+    // away from it.
+    if (
+      errorCode === "ENOENT" ||
+      errorCode === "EACCES" ||
+      (errorCode !== undefined && result.code === null)
+    )
       throw new Error(
-        `Couldn't run qmd at "${this.deps.getSettings().qmdPath}".`,
+        cannotRunText(this.deps.getSettings().qmdPath, errorCode),
       );
-    }
-    // Not started for any other reason, such as `ENOTDIR` for a path that treats a file as a
-    // folder. The code is named: "killed before it finished" would point away from the path.
-    if (errorCode !== undefined && result.code === null) {
-      throw new Error(
-        `Couldn't run qmd at "${this.deps.getSettings().qmdPath}" (${errorCode}).`,
-      );
-    }
     if (result.timedOut) throw new Error(`${command} timed out`);
     if (result.code !== 0) {
       const exit =

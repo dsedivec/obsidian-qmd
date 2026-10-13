@@ -22,13 +22,29 @@ export class QmdSearchError extends Error {
   }
 }
 
+/** True for what `env` prints when the `node` that the qmd launcher asks for is not on the PATH. */
+export function saysNodeIsMissing(text: string): boolean {
+  return /node: No such file or directory/.test(text);
+}
+
+/**
+ * What to say when `qmd` could not be started at all. A missing file and one that may not be
+ * executed need no more than the path. Any other reason, such as `ENOTDIR` for a path that
+ * treats a file as a folder, is named.
+ */
+export function cannotRunText(qmdPath: string, errorCode: string): string {
+  return errorCode === "ENOENT" || errorCode === "EACCES"
+    ? `Couldn't run qmd at "${qmdPath}".`
+    : `Couldn't run qmd at "${qmdPath}" (${errorCode}).`;
+}
+
 export function classifyStartFailure(
   logTail: string,
   spawnErrorCode: string | undefined,
 ): QmdErrorKind {
   if (spawnErrorCode === "ENOENT" || spawnErrorCode === "EACCES")
     return "qmd-not-found";
-  if (/node: No such file or directory/.test(logTail)) return "node-not-found";
+  if (saysNodeIsMissing(logTail)) return "node-not-found";
   if (/already in use/i.test(logTail)) return "port-in-use";
   return "server-start";
 }
