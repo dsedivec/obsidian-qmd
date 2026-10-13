@@ -2,6 +2,7 @@
   "name": "qmd-search",
   "version": "0.1.0",
   "description": "Search an Obsidian vault with QMD's hybrid search.",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "scripts": {

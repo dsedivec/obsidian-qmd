@@ -302,6 +302,10 @@ commit that was built, which has to be on GitHub already. Keep the tag and the
 `version` in the attached `manifest.json` the same: BRAT goes by the tag, and
 warns when the manifest disagrees with it.
 
+## License
+
+QMD Search is released under the MIT License. See [LICENSE](LICENSE).
+
 [qmd]: https://github.com/tobi/qmd
 [prek]: https://prek.j178.dev/
 [brat]: https://github.com/TfTHacker/obsidian42-brat
