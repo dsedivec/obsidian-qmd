@@ -16,7 +16,6 @@ describe("view-model", () => {
     [0, idle(120_000), "0 results · indexed 2 min ago", false], [null, idle(120_000), "Indexed 2 min ago", false],
     [null, idle(), "", false], [7, idle(), "7 results", false],
     [null, { kind: "running", step: "setup" }, "Indexing… (setting up)", false],
-    [null, { kind: "running", step: "models" }, "Indexing… (downloading models)", false],
     [7, { kind: "running", step: "update" }, "7 results · indexing… (scanning)", false],
     [null, { kind: "running", step: "embed" }, "Indexing… (embedding)", false],
     [null, { kind: "failed", message: "m" }, "Index failed: m", true], [3, { kind: "failed", message: "m" }, "3 results · index failed: m", true],

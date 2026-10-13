@@ -45,7 +45,11 @@ export function describeError(err: unknown, ctx: { qmdPath: string; port: number
     case "connection":
       return { message: "Lost the connection to the QMD server.", ...detail, links: ["retry"] };
     case "timeout":
-      return { message: "The search took longer than 2 minutes.", ...detail, links: ["retry"] };
+      return {
+        message: "The search took longer than 2 minutes.",
+        hint: "If QMD is still downloading its models, try again in a few minutes.",
+        ...detail, links: ["retry"],
+      };
     case "server-response":
       return { message: "QMD returned an unexpected response.", ...detail, links: ["retry"] };
     case "tool":

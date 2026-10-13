@@ -22,7 +22,7 @@ describe("describeError", () => {
     [E("port-in-use"), { message: "Port 8181 is in use by another program.", hint: "Change the server port in settings.", links: ["settings"] }],
     [E("server-start", "m", "log tail"), { message: "Couldn't start the QMD server.", detail: "log tail", links: ["settings", "retry"] }],
     [E("connection"), { message: "Lost the connection to the QMD server.", links: ["retry"] }],
-    [E("timeout"), { message: "The search took longer than 2 minutes.", links: ["retry"] }],
+    [E("timeout"), { message: "The search took longer than 2 minutes.", hint: "If QMD is still downloading its models, try again in a few minutes.", links: ["retry"] }],
     [E("server-response", "m", "<html>"), { message: "QMD returned an unexpected response.", detail: "<html>", links: ["retry"] }],
     [E("tool", "bad params"), { message: "bad params", links: ["retry"] }],
     [E("not-ready", "The vault is still being indexed for the first time."), { message: "The vault is still being indexed for the first time.", links: [] }],

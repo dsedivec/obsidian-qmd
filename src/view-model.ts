@@ -12,7 +12,6 @@ export function formatAge(ms: number): string {
 
 const STEP_TEXT = {
   setup: "setting up",
-  models: "downloading models",
   update: "scanning",
   embed: "embedding",
 } as const;

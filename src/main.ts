@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { Notice, Plugin, TFile, type FileSystemAdapter, type TAbstractFile } from "obsidian";
 import { CLI_COMMAND, CLI_DESCRIPTION, CLI_FLAGS, createCliHandler } from "./cli-handler";
-import { sanitizeSettings, type KeyValueStore, type QmdSearchSettings } from "./config";
+import { isValidCollectionName, sanitizeSettings, type KeyValueStore, type QmdSearchSettings } from "./config";
 import { describeError, type ErrorView } from "./errors";
 import { createExclusionCheck } from "./exclusions";
 import { Indexer } from "./indexer";
@@ -63,7 +63,6 @@ export default class QmdSearchPlugin extends Plugin {
       getSettings,
       vaultPath: (this.app.vault.adapter as FileSystemAdapter).getBasePath(),
       realpath: realpathSync,
-      store,
       now: Date.now,
     });
     this.search = new SearchService({
@@ -124,14 +123,22 @@ export default class QmdSearchPlugin extends Plugin {
 
   async updateSettings(patch: SettingsPatch): Promise<void> {
     const before = this.settings;
-    const after = sanitizeSettings({ ...before, ...patch }, this.app.vault.getName());
+    // A collection name that is not valid is refused and the name in use is kept. Sanitising it
+    // would put the name derived from the vault in its place, and the indexer would then create
+    // that collection: a typo must not leave behind a collection that the plugin never removes.
+    const typed = typeof patch.collectionName === "string" ? patch.collectionName.trim() : "";
+    const collectionName = isValidCollectionName(typed) ? typed : before.collectionName;
+    const after = sanitizeSettings({ ...before, ...patch, collectionName }, this.app.vault.getName());
     this.settings = after;
     // Acted on before the save is awaited, so that no search can start a server from the new
     // settings in between and have it stopped here.
-    if (after.port !== before.port || after.qmdPath !== before.qmdPath || after.extraPath !== before.extraPath) {
+    const qmdCommandChanged = after.qmdPath !== before.qmdPath || after.extraPath !== before.extraPath;
+    if (after.port !== before.port || qmdCommandChanged) {
       attempt("stop the QMD server", () => this.server.stopIfOwned());
     }
-    if (after.collectionName !== before.collectionName) void this.indexer.start();
+    // The indexer repeats its check once, whichever of these changed: the collection it looks
+    // for, or the qmd it runs to look. A failure to run qmd must not outlast the wrong path.
+    if (after.collectionName !== before.collectionName || qmdCommandChanged) void this.indexer.start();
     await this.saveData(after);
   }
 

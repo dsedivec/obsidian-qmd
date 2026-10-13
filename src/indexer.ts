@@ -1,12 +1,9 @@
-import type { KeyValueStore, QmdSearchSettings } from "./config";
+import type { QmdSearchSettings } from "./config";
 import type { CliResult } from "./qmd-cli";
-
-/** Device-local flag: `qmd pull` has already downloaded the models on this machine. */
-export const MODELS_PULLED_KEY = "qmd-search-models-pulled";
 
 export type IndexState =
   | { kind: "idle"; lastIndexedAt?: number }
-  | { kind: "running"; step: "setup" | "models" | "update" | "embed" }
+  | { kind: "running"; step: "setup" | "update" | "embed" }
   | { kind: "failed"; message: string };
 
 export interface IndexerDeps {
@@ -14,7 +11,6 @@ export interface IndexerDeps {
   getSettings: () => Pick<QmdSearchSettings, "collectionName" | "reindexQuietMinutes" | "qmdPath">;
   vaultPath: string;
   realpath: (path: string) => string;
-  store: KeyValueStore;
   now: () => number;
 }
 
@@ -26,7 +22,6 @@ type Found = "here" | "elsewhere" | "missing";
 const MINUTE_MS = 60_000;
 const SHOW_TIMEOUT_MS = MINUTE_MS;
 const ADD_TIMEOUT_MS = 10 * MINUTE_MS;
-const PULL_TIMEOUT_MS = 60 * MINUTE_MS;
 const UPDATE_TIMEOUT_MS = 10 * MINUTE_MS;
 const EMBED_TIMEOUT_MS = 30 * MINUTE_MS;
 
@@ -179,12 +174,6 @@ export class Indexer {
       if (found === "elsewhere") throw new Error(pointsElsewhere(name));
       if (found === "missing") {
         await this.qmd(["collection", "add", this.deps.vaultPath, "--name", name], ADD_TIMEOUT_MS);
-        if (renamed()) return;
-      }
-      if (this.deps.store.get(MODELS_PULLED_KEY) !== true) {
-        enter("models");
-        await this.qmd(["pull"], PULL_TIMEOUT_MS);
-        this.deps.store.set(MODELS_PULLED_KEY, true);
         if (renamed()) return;
       }
       enter("update");
