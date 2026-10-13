@@ -26,17 +26,14 @@ type Timer = ReturnType<typeof setTimeout>;
 type StatusListener = (status: "starting") => void;
 type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
 
-function isQmdServer(commandLine: string | null): boolean {
-  return commandLine !== null && commandLine.includes("qmd") && commandLine.includes("mcp");
-}
-
 /**
  * Makes sure a QMD server is reachable and stops only its own.
  *
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
  * `pending`, then in `owned`), or with one from a saved record that passed every check in
  * `adoptIfOurs` (held in `owned`). A server that merely answers health is neither, and is never
- * signalled.
+ * signalled. An owned PID is checked again right before SIGTERM, and forgotten as soon as its
+ * launcher is seen to exit, so a PID that died and was reused is not signalled either.
  */
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
@@ -68,23 +65,17 @@ export class ServerManager {
     clearTimeout(this.idleTimer);
     if (!this.owned) return;
     const { idleTimeoutMinutes } = this.deps.getSettings();
-    this.idleTimer = setTimeout(() => this.stopIfOwned(), idleTimeoutMinutes * 60_000);
+    this.idleTimer = setTimeout(() => this.stopOwned(), idleTimeoutMinutes * 60_000);
   }
 
   /** Synchronous, so it is safe to call from `beforeunload`. */
   stopIfOwned(): void {
-    const pid = this.owned?.pid ?? this.pending?.pid;
-    this.forget();
-    this.pending?.abort();
-    if (pid === undefined) return;
-    this.deps.killGroup(pid, "SIGTERM");
-    // Unconditional: `killGroup` does nothing once the group is gone, and the launcher dying first
-    // says nothing about the server it spawned. On unload `dispose` clears this before it fires.
-    const timer = setTimeout(() => {
-      this.killTimers.delete(timer);
-      this.deps.killGroup(pid, "SIGKILL");
-    }, KILL_GRACE_MS);
-    this.killTimers.add(timer);
+    this.stopOwned();
+    const starting = this.pending;
+    if (!starting) return;
+    starting.abort();
+    // Spawned moments ago and not yet exited, so this PID needs no identity check.
+    if (starting.pid !== undefined) this.terminate(starting.pid);
   }
 
   /** Crash recovery: takes back a server recorded by an earlier session, or clears the record. */
@@ -93,8 +84,7 @@ export class ServerManager {
     if (!record) return;
     const ours =
       record.port === this.deps.getSettings().port &&
-      this.deps.isAlive(record.pid) &&
-      isQmdServer(this.deps.commandLine(record.pid)) &&
+      this.looksLikeQmdServer(record.pid) &&
       (await this.deps.health(record.port));
     // A server this session spawned takes precedence, and its outcome settles the record.
     if (this.owned || this.pending) return;
@@ -113,17 +103,23 @@ export class ServerManager {
   private async start(): Promise<void> {
     const { port } = this.deps.getSettings();
     if (await this.deps.health(port)) return;
-    // A server this manager owned is not answering. Treat it as gone: forget it, do not signal it.
-    this.forget();
+    // An owned server that does not answer is stopped and replaced.
+    this.stopOwned();
     for (const listener of this.listeners) listener("starting");
     const server = this.deps.spawnServer(port);
     const outcome = await this.untilStarted(port, server);
     if (outcome === "healthy") {
-      if (server.pid !== undefined) this.own({ pid: server.pid, port });
+      if (server.pid === undefined) return;
+      const record = { pid: server.pid, port };
+      this.own(record);
+      // Once the launcher has exited its PID can be reused, so it must not stay on record.
+      void server.exit.then(() => {
+        if (this.owned === record) this.forget();
+      });
       return;
     }
-    // One SIGTERM and no SIGKILL follow-up, so that a failed start leaves no timer behind.
-    if (outcome === "timeout" && server.pid !== undefined) this.deps.killGroup(server.pid, "SIGTERM");
+    // As above: this PID has not exited since `spawnServer` returned it, so there is no identity check.
+    if (outcome === "timeout" && server.pid !== undefined) this.terminate(server.pid);
     const tail = this.deps.logTail(port);
     const errorCode = typeof outcome === "object" ? outcome.errorCode : undefined;
     throw new QmdSearchError(classifyStartFailure(tail, errorCode), "The QMD server did not start.", tail);
@@ -156,6 +152,37 @@ export class ServerManager {
       void server.exit.then(settle);
       poll();
     });
+  }
+
+  /** Forgets the owned server and, if its PID still looks like a QMD server, stops it. */
+  private stopOwned(): void {
+    const record = this.owned;
+    if (!record) return;
+    this.forget();
+    if (this.looksLikeQmdServer(record.pid)) this.terminate(record.pid);
+  }
+
+  /**
+   * The identity test for a PID the manager did not just spawn: alive, with a command line naming
+   * both qmd and mcp. Adoption requires it, and so does every SIGTERM to an owned server, in case
+   * the PID died and was reused.
+   */
+  private looksLikeQmdServer(pid: number): boolean {
+    if (!this.deps.isAlive(pid)) return false;
+    const commandLine = this.deps.commandLine(pid);
+    return commandLine !== null && commandLine.includes("qmd") && commandLine.includes("mcp");
+  }
+
+  /** SIGTERM now, SIGKILL five seconds later unless `dispose` clears it first. */
+  private terminate(pid: number): void {
+    this.deps.killGroup(pid, "SIGTERM");
+    // Unconditional: the launcher is gone by now, so its PID says nothing about the server it
+    // spawned, and `killGroup` does nothing once the whole group is gone.
+    const timer = setTimeout(() => {
+      this.killTimers.delete(timer);
+      this.deps.killGroup(pid, "SIGKILL");
+    }, KILL_GRACE_MS);
+    this.killTimers.add(timer);
   }
 
   private own(record: OwnedRecord): void {

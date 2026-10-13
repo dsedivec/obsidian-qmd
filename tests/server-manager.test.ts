@@ -11,7 +11,9 @@ interface FakeOptions {
   spawnPid: number | undefined;
   record: OwnedRecord | null;
   log: string;
+  /** PIDs that are running. A spawned server is added, and removed again when it exits. */
   alive: number[];
+  /** The command line reported for every PID. */
   cmd: string | null;
 }
 
@@ -19,33 +21,40 @@ interface FakeState extends FakeOptions {
   settings: { port: number; idleTimeoutMinutes: number };
   spawned: number[];
   killed: Array<[number, "SIGTERM" | "SIGKILL"]>;
-  /** Resolves the running server's `exit`, or the next server's when none has been spawned yet. */
-  exit(result: SpawnExit): void;
+  /** Spawns and signals in the order they happened, as "spawn 4242" and "SIGTERM 4242". */
+  events: string[];
+  /**
+   * Makes a spawned server exit: the latest one, or the one at index `which` in spawn order.
+   * Called before any spawn, it applies to the first server as soon as it is spawned.
+   */
+  exit(result: SpawnExit, which?: number): void;
 }
 
 function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState } {
   let pollsLeft: number | undefined;
-  let resolveExit: ((result: SpawnExit) => void) | undefined;
   let earlyExit: SpawnExit | undefined;
+  const servers: Array<{ pid: number | undefined; resolve(result: SpawnExit): void }> = [];
   const s: FakeState = {
     healthy: false,
     healthyAfterPolls: undefined,
     spawnPid: 4242,
     record: null,
     log: "",
-    alive: [],
-    cmd: null,
+    cmd: QMD_CMD,
     ...over,
+    alive: [...(over.alive ?? [])],
     settings: { port: 8181, idleTimeoutMinutes: 60 },
     spawned: [],
     killed: [],
-    exit(result) {
-      if (!resolveExit) {
+    events: [],
+    exit(result, which = servers.length - 1) {
+      const server = servers[which];
+      if (!server) {
         earlyExit = result;
         return;
       }
-      resolveExit(result);
-      resolveExit = undefined;
+      s.alive = s.alive.filter((pid) => pid !== server.pid);
+      server.resolve(result);
     },
   };
   const deps: ServerDeps = {
@@ -58,20 +67,24 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
       return s.healthy;
     },
     spawnServer: (port) => {
+      const pid = s.spawnPid;
       s.spawned.push(port);
+      s.events.push(`spawn ${pid}`);
+      if (pid !== undefined) s.alive.push(pid);
       pollsLeft = s.healthyAfterPolls;
       const exit = new Promise<SpawnExit>((resolve) => {
-        resolveExit = resolve;
+        servers.push({ pid, resolve });
       });
       if (earlyExit) s.exit(earlyExit);
       earlyExit = undefined;
-      return { pid: s.spawnPid, exit };
+      return { pid, exit };
     },
     logTail: () => s.log,
     isAlive: (pid) => s.alive.includes(pid),
     commandLine: () => s.cmd,
     killGroup: (pid, signal) => {
       s.killed.push([pid, signal]);
+      s.events.push(`${signal} ${pid}`);
     },
     loadRecord: () => s.record,
     saveRecord: (record) => {
@@ -259,12 +272,29 @@ describe("ServerManager starting", () => {
     await vi.advanceTimersByTimeAsync(120 * MIN);
     expect(s.killed).toEqual([]);
   });
-  it("leaves no timer after giving up, and signals the server only once", async () => {
+  it("force-kills five seconds after giving up, and leaves nothing else behind", async () => {
     const { deps, s } = fake({ healthy: false });
     const done = new ServerManager(deps).ensureRunning();
     const failed = expect(done).rejects.toMatchObject({ kind: "server-start" });
     await vi.advanceTimersByTimeAsync(60_000);
     await failed;
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toHaveLength(2); expect(s.record).toBeNull();
+  });
+  it("dispose clears the force-kill that follows giving up", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const done = m.ensureRunning();
+    const failed = expect(done).rejects.toMatchObject({ kind: "server-start" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await failed;
+    m.dispose();
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(120 * MIN);
     expect(s.killed).toEqual([[4242, "SIGTERM"]]);
@@ -317,18 +347,31 @@ describe("ServerManager signals only what it owns", () => {
     m.dispose();
     expect(s.killed).toEqual([]); expect(s.record).toEqual(saved);
   });
-  it("forgets an owned server that stops answering, without signalling it", async () => {
+  it("stops an owned server that no longer answers before spawning its replacement", async () => {
     const { m, s } = await started();
-    s.healthy = false; s.healthyAfterPolls = undefined;
+    s.healthy = false; s.healthyAfterPolls = 1; s.spawnPid = 5151;
     const again = m.ensureRunning();
-    const failed = expect(again).rejects.toMatchObject({ kind: "server-start" });
     await vi.advanceTimersByTimeAsync(0);
-    expect(s.spawned).toHaveLength(2); expect(s.record).toBeNull();
-    s.exit({ code: 1 });
-    await failed;
-    expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(120 * MIN);
-    m.stopIfOwned();
+    expect(s.events).toEqual(["spawn 4242", "SIGTERM 4242", "spawn 5151"]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(250);
+    await again;
+    expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(4750);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+    expect(s.record).toEqual({ pid: 5151, port: 8181 });
+  });
+  it.each([
+    ["is dead", (s: FakeState) => { s.alive = []; }],
+    ["now belongs to another program", (s: FakeState) => { s.cmd = "vim notes.md"; }],
+  ])("replaces an owned server that no longer answers without signalling a PID that %s", async (_name, change) => {
+    const { m, s } = await started();
+    change(s);
+    s.healthy = false; s.healthyAfterPolls = 1; s.spawnPid = 5151;
+    const again = m.ensureRunning();
+    await vi.advanceTimersByTimeAsync(250);
+    await again;
+    expect(s.events).toEqual(["spawn 4242", "spawn 5151"]); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(5000);
     expect(s.killed).toEqual([]);
   });
   it("treats a server that still answers after its own was stopped as external", async () => {
@@ -362,6 +405,92 @@ describe("ServerManager signals only what it owns", () => {
   });
 });
 
+describe("ServerManager checks a PID is still its server before SIGTERM", () => {
+  const owning = {
+    spawned: () => started(),
+    adopted: async () => {
+      const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777] });
+      const m = new ServerManager(deps);
+      await m.adoptIfOurs();
+      return { m, s };
+    },
+  };
+  const problems = {
+    "is not alive": (s: FakeState) => { s.alive = []; },
+    "has the command line of another program": (s: FakeState) => { s.cmd = "vim notes.md"; },
+    "has an unreadable command line": (s: FakeState) => { s.cmd = null; },
+  };
+  const cases: Array<["the idle timer" | "stopIfOwned", keyof typeof owning, keyof typeof problems]> = [];
+  for (const trigger of ["the idle timer", "stopIfOwned"] as const)
+    for (const source of ["spawned", "adopted"] as const)
+      for (const problem of Object.keys(problems) as Array<keyof typeof problems>) cases.push([trigger, source, problem]);
+
+  it.each(cases)("on %s, signals nothing and clears the record when the %s PID %s", async (trigger, source, problem) => {
+    const { m, s } = await owning[source]();
+    problems[problem](s);
+    if (trigger === "stopIfOwned") m.stopIfOwned();
+    else await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([]); expect(vi.getTimerCount()).toBe(0);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]);
+  });
+  it("gives up on a server that never answered without checking its PID first", async () => {
+    const { deps, s } = fake({ healthy: false, cmd: "vim notes.md" });
+    const done = new ServerManager(deps).ensureRunning();
+    const failed = expect(done).rejects.toMatchObject({ kind: "server-start" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await failed;
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+  it("stops a server that is still starting without checking its PID first", async () => {
+    const { deps, s } = fake({ healthy: false, cmd: "vim notes.md" });
+    const m = new ServerManager(deps);
+    const done = m.ensureRunning();
+    const failed = expect(done).rejects.toMatchObject({ kind: "server-start" });
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    await failed;
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+});
+
+describe("ServerManager when its server exits", () => {
+  it("forgets a server whose launcher exits after it started, and signals nothing", async () => {
+    const { m, s } = await started();
+    s.exit({ code: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([]);
+    m.stopIfOwned();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([]); expect(s.record).toBeNull();
+  });
+  it("does not signal the PID of an exited launcher even when another qmd server now has it", async () => {
+    const { m, s } = await started();
+    s.exit({ code: 0 });
+    s.alive.push(4242);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    m.stopIfOwned();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([]);
+  });
+  it("keeps the replacement on record when the server it replaced exits later", async () => {
+    const { m, s } = await started();
+    s.healthy = false; s.healthyAfterPolls = 1; s.spawnPid = 5151;
+    const again = m.ensureRunning();
+    await vi.advanceTimersByTimeAsync(250);
+    await again;
+    s.exit({ code: 0 }, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.killed).toContainEqual([5151, "SIGTERM"]);
+  });
+});
+
 describe("ServerManager stopping", () => {
   it("reads the idle timeout each time the timer starts", async () => {
     const { m, s } = await started();
@@ -369,6 +498,13 @@ describe("ServerManager stopping", () => {
     m.noteActivity();
     await vi.advanceTimersByTimeAsync(5 * MIN - 1); expect(s.killed).toEqual([]);
     await vi.advanceTimersByTimeAsync(1); expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+  it("force-kills the group even when the launcher exited on SIGTERM", async () => {
+    const { m, s } = await started();
+    m.stopIfOwned();
+    s.exit({ code: null });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]); expect(s.record).toBeNull();
   });
   it("dispose cancels the idle stop, keeps the record, and signals nothing", async () => {
     const { m, s } = await started();
@@ -396,11 +532,22 @@ describe("ServerManager adopting", () => {
     m.stopIfOwned();
     expect(s.killed).toEqual([]); expect(s.record).toBeNull();
   });
-  it.each(["qmd query notes", "node /x/mcp-server --http"])("does not adopt a command line of %j", async (cmd) => {
-    const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777], cmd });
+  // `stopIfOwned` clears the record of a PID that fails the identity test, so these assert before any stop.
+  it.each([
+    ["a different port", { record: { pid: 777, port: 9000 } }],
+    ["a dead pid", { alive: [] }],
+    ["another program", { cmd: "vim notes.md" }],
+    ["an unreadable command line", { cmd: null }],
+    ["a qmd command that is not the server", { cmd: "qmd query notes" }],
+    ["an mcp server that is not qmd", { cmd: "node /x/mcp-server --http" }],
+    ["no health answer", { healthy: false }],
+  ])("refuses adoption with %s at once: no record and no idle timer", async (_name, over) => {
+    const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777], cmd: QMD_CMD, ...over });
     const m = new ServerManager(deps);
-    await m.adoptIfOurs(); m.stopIfOwned();
-    expect(s.record).toBeNull(); expect(s.killed).toEqual([]);
+    await m.adoptIfOurs();
+    expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]);
   });
   it("force-kills an adopted server five seconds after stopping it", async () => {
     const { deps, s } = fake({ healthy: true, record: { pid: 777, port: 8181 }, alive: [777], cmd: QMD_CMD });
@@ -412,7 +559,8 @@ describe("ServerManager adopting", () => {
     expect(s.killed).toEqual([[777, "SIGTERM"], [777, "SIGKILL"]]);
   });
   it("keeps the record of a server it started when adoptIfOurs runs afterwards", async () => {
-    const { m, s } = await started(); // pid 4242 is not in `alive`, so the adoption checks alone would refuse it
+    const { m, s } = await started();
+    s.healthy = false; // one missed health answer, so the adoption checks alone would clear the record
     await m.adoptIfOurs();
     expect(s.record).toEqual({ pid: 4242, port: 8181 });
     m.stopIfOwned();
