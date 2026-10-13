@@ -126,8 +126,11 @@ point into a temp directory, and `qmd` never runs with a working directory at or
 below a `.qmd/index.yml`. The plugin always runs `qmd` from `/`; a test that
 starts `qmd` some other way must set a working directory inside its temp
 directory. In-app checks are made in a scratch vault through the Obsidian CLI.
-Dale's Main vault may be indexed and searched for testing. Its notes are
-read-only, and nothing is installed there without asking.
+Run each CLI call under `timeout -k`, and wait between steps in the shell, not
+with a timer inside `eval` code: a window that is hidden runs such timers about
+once a minute, and cannot be screenshotted. Dale's Main vault may be indexed and
+searched for testing. Its notes are read-only, and nothing is installed there
+without asking.
 
 ### Where the reasoning lives
 
@@ -138,8 +141,8 @@ Obsidian.
 ### User-facing wording
 
 Messages name the problem and the fix, plainly. The exact strings are pinned by
-tests in `tests/errors.test.ts`, `tests/view-model.test.ts` and
-`tests/cli-handler.test.ts`.
+tests in `tests/errors.test.ts`, `tests/view-model.test.ts`,
+`tests/qmd-check.test.ts` and `tests/cli-handler.test.ts`.
 
 ### Departures from the conventions above
 

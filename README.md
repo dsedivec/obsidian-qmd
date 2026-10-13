@@ -15,9 +15,28 @@ CLI.
 - macOS or Linux. The plugin is developed and tested on macOS. Windows and
   mobile are not supported.
 
-## Building and installing
+## Installing with BRAT
 
-The plugin is built and installed from a checkout of this repository:
+[BRAT][brat] is an Obsidian plugin that installs other plugins from their GitHub
+releases and keeps them up to date. To install QMD Search with it:
+
+1. Install "BRAT" from Settings → Community plugins, and turn it on.
+2. Run the command "BRAT: Plugins: Add a beta plugin for testing (with or
+   without version)".
+3. Under "Repository", enter `https://github.com/dsedivec/obsidian-qmd`. Under
+   "Select a version", choose "Latest version".
+4. Leave "Enable after installing the plugin" ticked, and choose "Add plugin".
+5. Set the QMD path, as [Setting the QMD path](#setting-the-qmd-path) describes.
+
+BRAT installs the newest release of the repository, so the repository has to
+have one: see [Publishing a release](#publishing-a-release). When a newer
+release is out, the command "BRAT: Plugins: Check for updates to all beta
+plugins and UPDATE" installs it. So does starting Obsidian, if BRAT's
+"Auto-update plugins at startup" setting is on.
+
+## Building and installing from a checkout
+
+The plugin can also be built and installed from a checkout of this repository:
 
 ```sh
 make setup
@@ -41,26 +60,34 @@ Then, in Obsidian, turn on "QMD Search" under Settings → Community plugins.
 After a later `make install-plugin`, turn the plugin off and on again to load
 the new build.
 
+## Setting the QMD path
+
 Check the "QMD path" setting before your first search. The default, `qmd`, is
 found only if `qmd` is in one of the "Extra PATH directories" or in a folder
 already on Obsidian's `PATH`, and Obsidian does not inherit your shell's `PATH`
 when it is started from the Dock. When `qmd` is not found, the pane says
 `Index failed: Couldn't run qmd at "qmd".` Enter the full path that `which qmd`
-prints in a terminal. The plugin runs `qmd` with a `PATH` made of that path's
-folder, then the "Extra PATH directories", then Obsidian's own `PATH`. If `node`
-is in none of those, add its folder to "Extra PATH directories".
+prints in a terminal. A leading `~` stands for your home folder, so
+`~/.npm-packages/bin/qmd` works. The plugin runs `qmd` with a `PATH` made of
+that path's folder, then the "Extra PATH directories", then Obsidian's own
+`PATH`. If `node` is in none of those, add its folder to "Extra PATH
+directories".
+
+The "Test" button beside the field tells you whether the path is right. It runs
+`qmd --version` just as the plugin would run `qmd`, and answers
+`Found QMD 2.8.3.` when all is well.
 
 ## Settings
 
-| Setting                        | Default                            | Notes                                                                                                       |
-| ------------------------------ | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| QMD path                       | `qmd`                              | The `qmd` executable. A bare name is looked up on the `PATH` described above.                               |
-| Extra PATH directories         | `/opt/homebrew/bin:/usr/local/bin` | Folders, separated by colons, that are added to `PATH` when the plugin runs `qmd`, so that it finds `node`. |
-| Collection name                | made from the vault's name         | The QMD collection for this vault. Letters, digits, `-` and `_` only, and it cannot start with `-`.         |
-| Server port                    | `8181`                             | The port of the QMD server, from 1 to 65535. 8181 is QMD's own default.                                     |
-| Idle timeout (minutes)         | `60`                               | How long after the last search the plugin stops a server it started. 1 to 1440.                             |
-| Reindex quiet period (minutes) | `5`                                | How long after the last change to a note the plugin reindexes the vault. 1 to 120.                          |
-| Result count                   | `10`                               | How many results a search shows. 1 to 50.                                                                   |
+| Setting                        | Default                            | Notes                                                                                                                                                      |
+| ------------------------------ | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| QMD path                       | `qmd`                              | The `qmd` executable. A bare name is looked up on the `PATH` described above. A leading `~` is your home folder.                                           |
+| Extra PATH directories         | `/opt/homebrew/bin:/usr/local/bin` | Folders, separated by colons, that are added to `PATH` when the plugin runs `qmd`, so that it finds `node`. A leading `~` in a folder is your home folder. |
+| Collection name                | made from the vault's name         | The QMD collection for this vault. Letters, digits, `-` and `_` only, and it cannot start with `-`.                                                        |
+| Server port                    | `8181`                             | The port of the QMD server, from 1 to 65535. 8181 is QMD's own default.                                                                                    |
+| Idle timeout (minutes)         | `60`                               | How long after the last search the plugin stops a server it started. 1 to 1440.                                                                            |
+| Reindex quiet period (minutes) | `5`                                | How long after the last change to a note the plugin reindexes the vault. 1 to 120.                                                                         |
+| Result count                   | `10`                               | How many results a search shows. 1 to 50.                                                                                                                  |
 
 A field is saved when you press Enter in it or leave it, and a change takes
 effect at the next search or index run. A value that cannot be used is not
@@ -76,6 +103,26 @@ becomes the nearest value allowed. "Extra PATH directories" may be left empty.
   is missing. The old one is left as it is.
 - Changing the port, the QMD path or the extra PATH directories stops a server
   that the plugin started.
+- A leading `~` is the only thing expanded in the two path settings: `~` alone,
+  or `~/` and what follows. `~name` for another user, a `~` further into a path,
+  and variables such as `$HOME` are left as they are. The setting keeps the `~`
+  as you typed it.
+
+The settings tab also has two things that are not settings:
+
+- **Test**, beside the QMD path, saves what is in the field and runs
+  `qmd --version` with the settings as they are. It reads no index and starts no
+  server. Under the field it then says one of these: `Found QMD` and the
+  version; that the file could not be run; that `qmd` started but failed, with
+  the first line it printed, and a hint when `node` was not found; that the
+  program ran but does not look like QMD; or that it did not answer within 15
+  seconds.
+- **QMD server**, under the server port, says how the server stands. It is read
+  again every three seconds while the tab is open. It says that the server is
+  not running, that it is starting, that it is running and this plugin started
+  it (with its process ID), that this plugin started it but it is not answering,
+  or that it is running and something else started it. The last is also what a
+  second vault shows while it shares the server that the first vault started.
 
 ## Commands
 
@@ -146,6 +193,8 @@ search to the next.
   `qmd mcp --http`, whose default port, 8181, is the plugin's too. Two vaults
   open at once share one server: the second uses the server that the first
   started, and starts its own at its next search if the first has stopped it.
+- **Seeing which.** The "QMD server" line in the settings tab says whether a
+  server is running, and whether this plugin started it.
 - **Stopping.** The plugin stops only a server that it started. It does so after
   the idle timeout has passed without a search, when the plugin is turned off,
   when the vault's window closes or Obsidian quits, and when the port, the QMD
@@ -218,5 +267,29 @@ name.
 `make help` lists the commands. `AGENTS.md` holds the conventions and the rules
 that a change to this plugin must keep.
 
+### Publishing a release
+
+BRAT installs the plugin from a GitHub release of
+`github.com/dsedivec/obsidian-qmd`. A release is tagged with the plugin's
+version, with no `v` in front, and has `main.js`, `manifest.json` and
+`styles.css` attached.
+
+1. Set the new version in `manifest.json` and `package.json`, and commit.
+2. Push the default branch. The release is made from its head.
+3. Build the plugin and create the release with the [GitHub CLI][gh]:
+
+```sh
+make build
+version=$(node -p 'require("./manifest.json").version')
+gh release create "$version" main.js manifest.json styles.css \
+  --title "$version" --generate-notes
+```
+
+`gh release create` makes the tag on GitHub if it is not there yet. Keep the tag
+and the `version` in the attached `manifest.json` the same: BRAT goes by the
+tag, and warns when the manifest disagrees with it.
+
 [qmd]: https://github.com/tobi/qmd
 [prek]: https://prek.j178.dev/
+[brat]: https://github.com/TfTHacker/obsidian42-brat
+[gh]: https://cli.github.com/
