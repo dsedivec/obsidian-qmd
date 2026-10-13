@@ -3,6 +3,7 @@ import {
   ServerManager,
   type OwnedRecord,
   type ServerDeps,
+  type ServerStatus,
   type SpawnExit,
 } from "../src/server-manager";
 
@@ -3381,4 +3382,150 @@ describe("ServerManager settling the saved record before any start", () => {
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+});
+
+describe("ServerManager reporting the server's status", () => {
+  const OWN_4242: ServerStatus = {
+    kind: "own",
+    pid: 4242,
+    port: 8181,
+    answering: true,
+  };
+  const OWN_777: ServerStatus = { ...OWN_4242, pid: 777 };
+  const recordedAndAlive = {
+    healthy: true,
+    record: { pid: 777, port: 8181 },
+    alive: [777],
+  };
+
+  it("says stopped when nothing answers, and does nothing but ask once", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    expect(await m.status()).toEqual({ kind: "stopped", port: 8181 });
+    expect(s.healthCalls).toBe(1);
+    expect(s.events).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("says a server that answers and is not its own is external, and leaves it alone", async () => {
+    const { deps, s } = fake({ healthy: true });
+    const m = new ServerManager(deps);
+    expect(await m.status()).toEqual({ kind: "external", port: 8181 });
+    expect(s.events).toEqual([]);
+    expect(s.record).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("says a server it spawned is its own, with its PID", async () => {
+    const { m } = await started();
+    expect(await m.status()).toEqual(OWN_4242);
+  });
+  it("says a server it adopted is its own", async () => {
+    const { deps } = fake(recordedAndAlive);
+    const m = new ServerManager(deps);
+    await m.adoptIfOurs();
+    expect(await m.status()).toEqual(OWN_777);
+  });
+  it("says its own server is not answering, and does not stop it as a search would", async () => {
+    const { m, s } = await started();
+    s.healthy = false;
+    expect(await m.status()).toEqual({ ...OWN_4242, answering: false });
+    expect(s.killed).toEqual([]);
+    expect(s.record).toEqual({ pid: 4242, port: 8181 });
+    expect(s.spawned).toEqual([8181]);
+  });
+  it("says starting while a spawned server has yet to answer, and its own once it does", async () => {
+    const { deps, s } = fake({ healthy: false, healthyAfterPolls: 10 });
+    const m = new ServerManager(deps);
+    const done = m.ensureRunning();
+    await flush();
+    expect(s.spawned).toEqual([8181]);
+    expect(await m.status()).toEqual({ kind: "starting", port: 8181 });
+    await vi.advanceTimersByTimeAsync(3000);
+    await done;
+    expect(await m.status()).toEqual(OWN_4242);
+    expect(s.spawned).toEqual([8181]);
+  });
+  it("says starting while a start waits for the server it replaces to be gone", async () => {
+    const { m, s } = await started();
+    s.healthy = false;
+    const done = watch(m.ensureRunning());
+    await flush();
+    expect(s.events).toEqual(["spawn 4242", "SIGTERM 4242"]);
+    expect(await m.status()).toEqual({ kind: "starting", port: 8181 });
+    expect(done.state).toBe("pending");
+    m.stopIfOwned();
+  });
+  it("does not say starting of a search that is only checking a server already there", async () => {
+    const { deps, s } = fake({ healthy: true, deferHealth: true });
+    const m = new ServerManager(deps);
+    let seen: ServerStatus | undefined;
+    void m.status().then((status) => {
+      seen = status;
+    });
+    const done = m.ensureRunning();
+    // The status asked first, and is answered while the search still waits for its own answer.
+    s.answerHealth(true);
+    await flush();
+    expect(seen).toEqual({ kind: "external", port: 8181 });
+    s.answerHealth(true);
+    await done;
+    expect(s.spawned).toEqual([]);
+  });
+  it("says stopped, not starting, once a stop has cancelled the start", async () => {
+    const { deps } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const done = watch(m.ensureRunning());
+    await flush();
+    m.stopIfOwned();
+    await flush();
+    expect(done.state).toBe("rejected");
+    expect(await m.status()).toEqual({ kind: "stopped", port: 8181 });
+  });
+  it("leaves the idle timer as it was", async () => {
+    const { m, s } = await started();
+    await vi.advanceTimersByTimeAsync(59 * MIN);
+    await m.status();
+    expect(s.killed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(MIN);
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+  it("does not make the adoption itself: a recorded server not yet examined is not yet its own", async () => {
+    const { deps, s } = fake(recordedAndAlive);
+    const m = new ServerManager(deps);
+    expect(await m.status()).toEqual({ kind: "external", port: 8181 });
+    expect(s.record).toEqual({ pid: 777, port: 8181 });
+    expect(s.killed).toEqual([]);
+    await m.adoptIfOurs();
+    expect(await m.status()).toEqual(OWN_777);
+  });
+  it("waits for an adoption that is asking the recorded server, and reports what came of it", async () => {
+    const { deps, s } = fake({ ...recordedAndAlive, deferHealth: true });
+    const m = new ServerManager(deps);
+    const adopting = m.adoptIfOurs();
+    let seen: ServerStatus | undefined;
+    void m.status().then((status) => {
+      seen = status;
+    });
+    await flush();
+    // Only the adoption has asked so far.
+    expect(s.healthCalls).toBe(1);
+    s.answerHealth(true);
+    await adopting;
+    await flush();
+    expect(seen).toBeUndefined();
+    expect(s.healthCalls).toBe(2);
+    s.answerHealth(true);
+    await flush();
+    expect(seen).toEqual(OWN_777);
+  });
+  it("speaks of the port that is set: a server it owns on another port is not the one there", async () => {
+    const { m, s } = await started();
+    s.settings = { port: 9000, idleTimeoutMinutes: 60 };
+    expect(await m.status()).toEqual({ kind: "external", port: 9000 });
+    expect(s.killed).toEqual([]);
+  });
+  it("still answers after dispose", async () => {
+    const { m } = await started();
+    m.dispose();
+    expect(await m.status()).toEqual(OWN_4242);
+  });
 });

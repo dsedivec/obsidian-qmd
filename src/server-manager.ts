@@ -52,6 +52,16 @@ const ADOPT_WAIT_MS = 3_000;
 const SHUT_DOWN = "QMD Search was shut down.";
 const CANCELLED = "The QMD server start was cancelled.";
 
+/** What `status` reports of the server on the port that is set. */
+export type ServerStatus =
+  | { kind: "stopped"; port: number }
+  /** A start is under way: it has found nothing answering and is bringing a server up. */
+  | { kind: "starting"; port: number }
+  /** A server this manager spawned or adopted. `answering` says whether it answered health just now. */
+  | { kind: "own"; pid: number; port: number; answering: boolean }
+  /** A server answers that this manager does not own. It is used, and never stopped. */
+  | { kind: "external"; port: number };
+
 type Timer = ReturnType<typeof setTimeout>;
 type StatusListener = (status: "starting") => void;
 type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
@@ -204,6 +214,30 @@ export class ServerManager {
       this.holds--;
       if (this.holds === 0) this.noteActivity();
     };
+  }
+
+  /**
+   * Says how things stand on the port that is set, for the settings tab to show. It looks and
+   * changes nothing: one health check, no signal, no spawn, no timer touched, and nothing saved.
+   * Unlike a start, it leaves an owned server that does not answer as it is. It still works after
+   * `dispose`.
+   *
+   * It does not make the adoption, which may signal. While an adoption that has begun is still
+   * asking the recorded server, it waits for that to settle, so that a server about to be taken
+   * back is not called someone else's.
+   */
+  async status(): Promise<ServerStatus> {
+    if (this.adopting !== null) await this.adoption?.catch(() => {});
+    const { port } = this.deps.getSettings();
+    const answering = await this.deps.health(port);
+    // Read after the answer, so that the report is true of now.
+    const owned = this.owned;
+    if (owned?.port === port)
+      return { kind: "own", pid: owned.pid, port, answering };
+    // The attempt in flight has told its callers that it is starting a server: see `start`.
+    if (this.attempt !== null && this.listeners === null)
+      return { kind: "starting", port };
+    return answering ? { kind: "external", port } : { kind: "stopped", port };
   }
 
   /** Synchronous, so it is safe to call from `beforeunload`. */

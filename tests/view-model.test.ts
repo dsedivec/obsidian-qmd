@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { IndexState } from "../src/indexer";
+import type { ServerStatus } from "../src/server-manager";
 import {
   folderLabel,
   footerText,
   formatAge,
   moveSelection,
   scorePercent,
+  serverStatusText,
   statusText,
 } from "../src/view-model";
 
@@ -87,4 +89,26 @@ describe("view-model", () => {
   ])("folderLabel(%j) is %j", (folder, text) =>
     expect(folderLabel(folder)).toBe(text),
   );
+
+  it.each<[ServerStatus, string]>([
+    [
+      { kind: "stopped", port: 8181 },
+      "Not running. It starts with your next search.",
+    ],
+    [{ kind: "starting", port: 8181 }, "Starting…"],
+    [
+      { kind: "own", pid: 63207, port: 8181, answering: true },
+      "Running on port 8181, started by this plugin (PID 63207).",
+    ],
+    [
+      { kind: "own", pid: 63207, port: 9000, answering: false },
+      "Started by this plugin (PID 63207), but not answering on port 9000.",
+    ],
+    [
+      { kind: "external", port: 8181 },
+      "Running on port 8181. Something else started it, so it is left running.",
+    ],
+  ])("serverStatusText(%j) is %j", (status, text) => {
+    expect(serverStatusText(status)).toBe(text);
+  });
 });

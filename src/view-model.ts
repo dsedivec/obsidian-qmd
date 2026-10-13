@@ -1,5 +1,6 @@
 import type { IndexState } from "./indexer";
 import type { SearchStatus } from "./search-service";
+import type { ServerStatus } from "./server-manager";
 
 export function formatAge(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
@@ -41,6 +42,23 @@ export function footerText(
 export function statusText(status: SearchStatus, elapsedMs: number): string {
   const label = status === "starting" ? "Starting QMD server…" : "Searching…";
   return `${label} ${Math.floor(elapsedMs / 1000)}s`;
+}
+
+/** The line the settings tab shows for the QMD server. */
+export function serverStatusText(status: ServerStatus): string {
+  switch (status.kind) {
+    case "stopped":
+      return "Not running. It starts with your next search.";
+    case "starting":
+      return "Starting…";
+    case "own":
+      return status.answering
+        ? `Running on port ${status.port}, started by this plugin (PID ${status.pid}).`
+        : `Started by this plugin (PID ${status.pid}), but not answering on port ${status.port}.`;
+    // Another vault's copy of this plugin, or a `qmd mcp` run by hand: either way not this one's.
+    case "external":
+      return `Running on port ${status.port}. Something else started it, so it is left running.`;
+  }
 }
 
 /** Index of the selected result, or null when the input has focus. */
