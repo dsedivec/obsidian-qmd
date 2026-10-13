@@ -4,8 +4,10 @@ import {
   applySettingsPatch,
   buildPath,
   deriveCollectionName,
+  expandHome,
   isValidCollectionName,
   sanitizeSettings,
+  withHomeExpanded,
   type QmdSearchSettings,
 } from "../src/config";
 
@@ -343,5 +345,92 @@ describe("applySettingsPatch", () => {
       idleTimeoutMinutes: 1440,
       reindexQuietMinutes: 3,
     });
+  });
+});
+
+describe("expandHome", () => {
+  it.each([
+    ["~", "/Users/alex"],
+    ["~/", "/Users/alex/"],
+    ["~/.npm-packages/bin/qmd", "/Users/alex/.npm-packages/bin/qmd"],
+    ["~/my tools/qmd", "/Users/alex/my tools/qmd"],
+  ])("reads a leading ~ in %j as the home folder", (path, expected) => {
+    expect(expandHome(path, "/Users/alex")).toBe(expected);
+  });
+
+  it.each([
+    ["qmd"],
+    ["/usr/local/bin/qmd"],
+    // Only the user's own home: no other user's, and no shell variables.
+    ["~alex/bin/qmd"],
+    ["~qmd"],
+    ["~~/qmd"],
+    ["$HOME/bin/qmd"],
+    ["${HOME}/bin/qmd"],
+    // Only at the start.
+    ["bin/~/qmd"],
+    ["/opt/~/qmd"],
+    ["/opt/qmd~"],
+    [""],
+  ])("leaves %j as it is", (path) => {
+    expect(expandHome(path, "/Users/alex")).toBe(path);
+  });
+
+  it.each([
+    ["~/bin/qmd", "/Users/alex/", "/Users/alex/bin/qmd"],
+    ["~", "/Users/alex/", "/Users/alex/"],
+    ["~/bin/qmd", "/", "/bin/qmd"],
+    ["~", "/", "/"],
+  ])(
+    "does not double the slash: %j with home %j is %j",
+    (path, home, expected) => {
+      expect(expandHome(path, home)).toBe(expected);
+    },
+  );
+
+  // "~/bin/qmd" must never become "/bin/qmd", which is some other program.
+  it.each([["~"], ["~/bin/qmd"]])(
+    "leaves %j as it is when the home folder is not known",
+    (path) => {
+      expect(expandHome(path, "")).toBe(path);
+    },
+  );
+});
+
+describe("withHomeExpanded", () => {
+  const typed: QmdSearchSettings = {
+    qmdPath: "~/.npm-packages/bin/qmd",
+    extraPath: "~/.local/bin:/opt/homebrew/bin:~:/srv/~/bin",
+    collectionName: "Custom_1",
+    port: 9000,
+    idleTimeoutMinutes: 30,
+    reindexQuietMinutes: 7,
+    resultCount: 12,
+  };
+
+  it("expands the QMD path and each extra PATH directory, and nothing else", () => {
+    expect(withHomeExpanded(typed, "/Users/alex")).toEqual({
+      qmdPath: "/Users/alex/.npm-packages/bin/qmd",
+      extraPath:
+        "/Users/alex/.local/bin:/opt/homebrew/bin:/Users/alex:/srv/~/bin",
+      collectionName: "Custom_1",
+      port: 9000,
+      idleTimeoutMinutes: 30,
+      reindexQuietMinutes: 7,
+      resultCount: 12,
+    });
+  });
+
+  it("leaves the settings it was given as they were typed", () => {
+    const before = { ...typed };
+    withHomeExpanded(typed, "/Users/alex");
+    expect(typed).toEqual(before);
+  });
+
+  it("gives the PATH of the spawned qmd the expanded directories", () => {
+    const { qmdPath, extraPath } = withHomeExpanded(typed, "/Users/alex");
+    expect(buildPath(qmdPath, extraPath, "/usr/bin:/bin")).toBe(
+      "/Users/alex/.npm-packages/bin:/Users/alex/.local/bin:/opt/homebrew/bin:/Users/alex:/srv/~/bin:/usr/bin:/bin",
+    );
   });
 });

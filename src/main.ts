@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import {
   Notice,
   Plugin,
@@ -16,6 +17,7 @@ import {
 import {
   applySettingsPatch,
   sanitizeSettings,
+  withHomeExpanded,
   type KeyValueStore,
   type QmdSearchSettings,
 } from "./config";
@@ -74,7 +76,7 @@ export default class QmdSearchPlugin extends Plugin {
     // ever be removed again, and a CLI command left registered makes the next load throw.
     if (this.stopped) return;
 
-    const getSettings = (): QmdSearchSettings => this.settings;
+    const getSettings = (): QmdSearchSettings => this.effectiveSettings();
     const store: KeyValueStore = {
       get: (key) => this.app.loadLocalStorage(key),
       set: (key, value) => this.app.saveLocalStorage(key, value),
@@ -180,9 +182,17 @@ export default class QmdSearchPlugin extends Plugin {
     await this.saveData(after);
   }
 
+  /**
+   * The settings as every unit that runs `qmd` is given them: a leading `~` in the QMD path and in
+   * the extra PATH directories is the home folder. `settings` keeps what was typed.
+   */
+  effectiveSettings(): QmdSearchSettings {
+    return withHomeExpanded(this.settings, homedir());
+  }
+
   /** `describeError` with the current QMD path and port. */
   describe(err: unknown): ErrorView {
-    return describeError(err, this.settings);
+    return describeError(err, this.effectiveSettings());
   }
 
   /** Shows the search pane, opening it in the right sidebar if there is none, and puts the cursor in its input. */

@@ -167,6 +167,37 @@ export function applySettingsPatch(
   return sanitizeSettings(next, vaultName);
 }
 
+/**
+ * `path` with a leading `~` read as the user's home folder: `~` alone, or `~/` and what follows.
+ * Nothing else is expanded: not another user's `~name`, not a `~` further in, not a variable.
+ * A home folder that is not known leaves the path as it is, so that `~/bin/qmd` can never come to
+ * mean `/bin/qmd`.
+ */
+export function expandHome(path: string, home: string): string {
+  if (home === "") return path;
+  if (path === "~") return home;
+  if (!path.startsWith("~/")) return path;
+  return home.replace(/\/+$/, "") + path.slice(1);
+}
+
+/**
+ * The settings as the units that run `qmd` use them: the QMD path and each extra PATH directory
+ * with a leading `~` expanded. The settings themselves keep what was typed, and the settings tab
+ * shows that.
+ */
+export function withHomeExpanded(
+  settings: QmdSearchSettings,
+  home: string,
+): QmdSearchSettings {
+  return {
+    ...settings,
+    qmdPath: expandHome(settings.qmdPath, home),
+    extraPath: splitPath(settings.extraPath)
+      .map((dir) => expandHome(dir, home))
+      .join(":"),
+  };
+}
+
 function splitPath(path: string): string[] {
   return path
     .split(":")
