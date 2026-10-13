@@ -93,7 +93,8 @@ them needs Dale's say-so.
 
 Results are compact and Google-like, with the note title as the top line and the
 link. The pane works at any width. Colours and sizes come only from Obsidian's
-theme variables. The approved mockup is in `docs/superpowers/specs/`.
+theme variables. The approved mockup is among the design papers: see "Where the
+reasoning lives".
 
 ### Safety rules that must not regress
 
@@ -135,9 +136,25 @@ refuses it unless it is given `--allow-protected`.
 
 ### Where the reasoning lives
 
-It is in the spec and the plan, under `docs/superpowers/`. The spec's
-"Experiment results" section records what was measured against the real QMD and
-Obsidian.
+It is in the design spec, the implementation plan and the approved mockup. They
+are Dale's working papers and are not in the repository: in his checkout they
+are under `docs/superpowers/`, which Git ignores. If that folder is there, read
+the spec before changing how the plugin behaves. Its "Experiment results"
+section records what was measured against the real QMD and Obsidian. Never add
+the folder to Git.
+
+### Publishing
+
+The repository is public, at `github.com/dsedivec/obsidian-qmd`. What was left
+out of it on purpose must stay out:
+
+- Commit messages carry no link to a coding-agent session: no `Claude-Session:`
+  trailer. `Co-Authored-By:` is fine.
+- Commits use the GitHub no-reply address that this checkout's Git config sets.
+- No absolute path on Dale's machine and no personal address goes into a tracked
+  file. A test that needs a home folder uses a made-up one.
+- The history from before publication is kept under `refs/archive/`. Push
+  branches by name, and never with `--mirror`.
 
 ### User-facing wording
 
@@ -150,8 +167,6 @@ tests in `tests/errors.test.ts`, `tests/view-model.test.ts`,
 - `main.ts` exports the plugin class as its default export, because Obsidian
   requires that, and the Vitest and ESLint config files need one too. Named
   exports everywhere else.
-- The spec and the plan are records: Prettier wraps them, but markdownlint skips
-  them and they are not reworded for it.
 - Everything under `tests/fixtures/` stays byte-exact, so the hooks skip it.
 - `make validate` leaves out the integration tests. Run `make integration` when
   a change touches how `qmd` is run or spoken to.

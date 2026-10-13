@@ -17,8 +17,6 @@ ignores:
   - .venv
   # The fixture vault's notes are test data and must stay byte-exact.
   - tests/fixtures
-  # The spec and the plan are records of what was decided. Prettier wraps them,
-  # but they are not reworded to satisfy a rule: they hold code spans too long
-  # to break, code spans that end in a space, and fences with no language.
-  - docs/superpowers/specs
-  - docs/superpowers/plans
+  # The design papers are not in Git. They are records of what was decided, and
+  # are not reworded to satisfy a rule.
+  - docs/superpowers

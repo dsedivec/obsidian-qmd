@@ -80,8 +80,8 @@ interface StoppedGroup {
  * not start, adopt, or identify as its own from a saved record. A server it started can still be
  * left behind when it does not act on SIGTERM and the window closes before the SIGKILL that
  * follows five seconds later, whichever stop sent the SIGTERM: that timer dies with the page, and
- * the record is already cleared. The design document sets this out as a known limit, under
- * "ServerManager".
+ * the record is already cleared. The README sets this out as a known limit, under "The QMD
+ * server".
  *
  * `killGroup` is called only with a PID that `spawnServer` returned to this manager (held in
  * `pending`, then in `owned`), or with one from a saved record: either `adoptIfOurs` kept that

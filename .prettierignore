@@ -4,7 +4,7 @@ package-lock.json
 
 # Captures from a real QMD server and the fixture vault's notes: byte-exact.
 tests/fixtures/
-# The approved mockup, kept exactly as it was approved.
-docs/superpowers/specs/2026-10-12-qmd-search-mockup.html
+# The design papers are not in Git, and are left exactly as they are.
+docs/superpowers/
 # The plugin bundle that `npm run build` writes.
 main.js
