@@ -8,7 +8,8 @@
 // Run:  node scripts/probe-qmd.mjs     (QMD_BIN overrides the `qmd` binary)
 //
 // Findings go to stdout, one line each. Progress and qmd's own output go to
-// stderr. The first run downloads QMD's models into ~/.cache/qmd/models.
+// stderr. On a machine that does not have QMD's models yet, `qmd embed` and the
+// first query download them into ~/.cache/qmd/models.
 
 import { spawn } from "node:child_process";
 import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -282,7 +283,9 @@ async function main() {
   // 1. A throwaway index over a copy of the fixture vault.
   await cp(join(FIXTURES, "vault"), vault, { recursive: true });
   await run(["collection", "add", vault, "--name", COLLECTION]);
-  await run(["pull"]);
+  // No `qmd pull` here. It deletes a cached model and downloads it again
+  // whenever its check against huggingface.co fails, and the probe does not
+  // need it: `qmd embed` and the first query fetch a missing model themselves.
   await run(["embed", "-c", COLLECTION]);
 
   const show = await run(["collection", "show", COLLECTION]);

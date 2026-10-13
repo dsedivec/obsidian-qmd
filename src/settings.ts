@@ -22,7 +22,7 @@ const FIELDS: ReadonlyArray<{
     key: "collectionName",
     name: "Collection name",
     description:
-      "QMD collection for this vault. Letters, digits, - and _ only.",
+      "QMD collection for this vault. Letters, digits, - and _ only, and it cannot start with -.",
   },
   {
     key: "port",

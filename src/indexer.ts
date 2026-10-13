@@ -72,7 +72,10 @@ export class Indexer {
     this.latestStart = new Promise((resolve) => (this.signalStarted = resolve));
   }
 
-  /** The load-time check. Call it again whenever the collection-name setting changes. */
+  /**
+   * The load-time check. Call it again whenever the collection-name, QMD path or extra PATH
+   * directories setting changes: any of them can change what the check finds.
+   */
   start(): Promise<void> {
     const check = this.checkCollection();
     this.latestStart = check;

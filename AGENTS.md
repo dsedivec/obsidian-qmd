@@ -79,3 +79,71 @@ above come from the project-bootstrap template and are refreshed by
 
 Anything below contradicting a convention above wins: the sections above are
 defaults this project may have deliberately departed from.
+
+### What this is for, and what it is not
+
+One thing: keep the vault indexed in QMD and show `qmd query` results in a
+compact sidebar pane. Dale built it because the other plugins he tried added too
+much or did not work. These were asked about and deliberately left out: AI chat,
+search-as-you-type, keyword-only or vector-only modes, an exclude-folders
+setting, status-bar items and ribbon icons, mobile, and Windows. Adding any of
+them needs Dale's say-so.
+
+### The look
+
+Results are compact and Google-like, with the note title as the top line and the
+link. The pane works at any width. Colours and sizes come only from Obsidian's
+theme variables. The approved mockup is in `docs/superpowers/specs/`.
+
+### Safety rules that must not regress
+
+- Never write to a note.
+- Never remove, rename or edit a QMD collection. Only create the vault's own
+  when it is missing.
+- Signal only a process the plugin spawned, adopted, or identified as its own
+  from a saved record by the stricter check: the group has a live member, and
+  one command line in it holds `qmd`, `mcp` and `--port` with the record's own
+  port. Always act on the server's process group, not just its launcher.
+- Never run `qmd pull`, or refresh models in any other way, automatically.
+- Never start a process through a shell, or build a command as a string.
+- Talk to QMD only with Node's `http` on `localhost`: not `fetch`, and not
+  `127.0.0.1`.
+- Text from notes or from QMD goes into the DOM as text, never as HTML.
+
+### How the code is organised
+
+Logic lives in small units that take their dependencies as constructor arguments
+and are tested with fakes. Only `main.ts`, `settings.ts` and `view.ts` import
+Obsidian at runtime, and they stay thin. A behaviour change goes into the tested
+unit, test-first.
+
+### Testing
+
+Unit tests run in Vitest. Integration tests run the real `qmd`, always isolated
+with `INDEX_PATH` and `QMD_CONFIG_DIR`, so that the default index is never
+touched. In-app checks are made in a scratch vault through the Obsidian CLI.
+Dale's Main vault is not a test bed: its notes are read-only, and nothing is
+installed there without asking.
+
+### Where the reasoning lives
+
+It is in the spec and the plan, under `docs/superpowers/`. The spec's
+"Experiment results" section records what was measured against the real QMD and
+Obsidian.
+
+### User-facing wording
+
+Messages name the problem and the fix, plainly. The exact strings are pinned by
+tests in `tests/errors.test.ts`, `tests/view-model.test.ts` and
+`tests/cli-handler.test.ts`.
+
+### Departures from the conventions above
+
+- `main.ts` exports the plugin class as its default export, because Obsidian
+  requires that, and the Vitest and ESLint config files need one too. Named
+  exports everywhere else.
+- The spec and the plan are records: Prettier wraps them, but markdownlint skips
+  them and they are not reworded for it.
+- Everything under `tests/fixtures/` stays byte-exact, so the hooks skip it.
+- `make validate` leaves out the integration tests. Run `make integration` when
+  a change touches how `qmd` is run or spoken to.

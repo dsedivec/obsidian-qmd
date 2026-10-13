@@ -1,0 +1,198 @@
+# QMD Search
+
+QMD Search is an Obsidian plugin that searches a vault with [QMD][qmd]'s hybrid
+search. It keeps the vault indexed in QMD on its own, and shows the results of
+`qmd query` (query expansion, hybrid retrieval and reranking) in a compact
+sidebar pane. Scripts and agents can run the same search through the Obsidian
+CLI.
+
+## Requirements
+
+- [QMD][qmd] 2.8 or later.
+- `node`, which QMD runs on, in a folder that the plugin's "Extra PATH
+  directories" setting names.
+- Obsidian 1.12.2 or later, on the desktop.
+- macOS or Linux. The plugin is developed and tested on macOS. Windows and
+  mobile are not supported.
+
+## Building and installing
+
+The plugin is built and installed from a checkout of this repository:
+
+```sh
+make setup
+make build
+make install-plugin VAULT="/path/to/your vault"
+```
+
+`make setup` installs the npm packages and the Git hooks, so it needs npm and
+[prek][prek]. If you only want to build the plugin, `npm install` does in its
+place. `make build` typechecks the code and writes `main.js`.
+`make install-plugin` copies `main.js`, `manifest.json` and `styles.css` into
+the vault's `.obsidian/plugins/qmd-search` folder. It refuses a folder that is
+not a vault. It also refuses the vault at `/Users/alex/Documents/Obsidian/Main`,
+which takes running the script itself with `--allow-main`:
+
+```sh
+node scripts/install-plugin.mjs /Users/alex/Documents/Obsidian/Main --allow-main
+```
+
+Then, in Obsidian, turn on "QMD Search" under Settings → Community plugins.
+After a later `make install-plugin`, turn the plugin off and on again to load
+the new build.
+
+Set the "QMD path" setting before your first search. Obsidian does not inherit
+your shell's `PATH` when it is started from the Dock, so the default, `qmd`, is
+usually not found, and the pane then says
+`Index failed: Couldn't run qmd at "qmd".` Enter the full path that `which qmd`
+prints in a terminal. The plugin runs `qmd` with a `PATH` made of that path's
+folder, then the "Extra PATH directories", then Obsidian's own `PATH`. If `node`
+is in none of those, add its folder to "Extra PATH directories".
+
+## Settings
+
+| Setting                        | Default                            | Notes                                                                                                       |
+| ------------------------------ | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| QMD path                       | `qmd`                              | The `qmd` executable. A bare name is looked up on the `PATH` described above.                               |
+| Extra PATH directories         | `/opt/homebrew/bin:/usr/local/bin` | Folders, separated by colons, that are added to `PATH` when the plugin runs `qmd`, so that it finds `node`. |
+| Collection name                | made from the vault's name         | The QMD collection for this vault. Letters, digits, `-` and `_` only, and it cannot start with `-`.         |
+| Server port                    | `8181`                             | The port of the QMD server, from 1 to 65535. 8181 is QMD's own default.                                     |
+| Idle timeout (minutes)         | `60`                               | How long after the last search the plugin stops a server it started. 1 to 1440.                             |
+| Reindex quiet period (minutes) | `5`                                | How long after the last change to a note the plugin reindexes the vault. 1 to 120.                          |
+| Result count                   | `10`                               | How many results a search shows. 1 to 50.                                                                   |
+
+A field is saved when you press Enter in it or leave it, and a change takes
+effect at the next search or index run.
+
+- The collection name is made from the vault's name the first time the plugin
+  loads, and renaming the vault later does not change it. A name that breaks the
+  rule is refused, and the name in use is kept.
+- Changing the collection name makes the plugin create the new collection if it
+  is missing. The old one is left as it is.
+- Changing the port, the QMD path or the extra PATH directories stops a server
+  that the plugin started.
+
+## Commands
+
+- **Search** shows the search pane, opening it in the right sidebar if it is not
+  open, and puts the cursor in its search box. It has no hotkey until you give
+  it one under Settings → Hotkeys.
+- **Reindex vault now** runs the indexer at once, and shows a notice when it has
+  finished or failed.
+
+In the pane, Enter runs the search. Down moves from the search box into the
+results, and Up and Down move between them. Enter opens the selected note at the
+matching line, and Cmd-Enter (Ctrl-Enter on Linux) opens it in a new tab. A
+click and a Cmd-click do the same. Notes that Obsidian's "Excluded files"
+setting covers are left out of the results.
+
+## Obsidian CLI
+
+The plugin adds a `qmd-search` subcommand to the Obsidian CLI. It runs the same
+search as the pane, with the same settings, exclusions and server:
+
+```sh
+obsidian vault="Notes" qmd-search query="pod identity" limit=1
+```
+
+```text
+Projects/Platform/EKS plan.md:42  (88%)
+  Move workloads off node instance profiles so each pod gets only the access it needs.
+```
+
+| Flag           | Meaning                                                                 |
+| -------------- | ----------------------------------------------------------------------- |
+| `query=<text>` | Required. The search text.                                              |
+| `limit=<n>`    | A whole number from 1 to 50. The default is the "Result count" setting. |
+| `json`         | Print a JSON array of the results in place of the text.                 |
+
+Each result is printed as its path and line, its score, and a snippet. A JSON
+result holds `path`, `title`, `folder`, `line`, `score` (from 0 to 1) and
+`snippet`. With no results the command prints `No results.`, or `[]` with
+`json`. A failure is printed as a line that starts with `Error:`, and the CLI
+exits with status 0 either way.
+
+Run the command with a timeout. The Obsidian CLI has no time limit of its own,
+and a `qmd-search` call that is in flight when its vault's window closes never
+returns. Scripts and agents should wrap it, for example in `timeout -k`.
+
+## The QMD server
+
+A search goes to a QMD HTTP server, which keeps QMD's models loaded from one
+search to the next.
+
+- **Starting.** If no QMD server answers on the "Server port" when you search,
+  the plugin starts one with `qmd mcp --http --port <port>`. The pane says
+  "Starting QMD server…" while it waits.
+- **Sharing.** A QMD server that already answers on that port is used as it is,
+  and the plugin never stops it. That includes one you started yourself with
+  `qmd mcp --http`, whose default port, 8181, is the plugin's too. Two vaults
+  open at once share one server: the second uses the server that the first
+  started, and starts its own at its next search if the first has stopped it.
+- **Stopping.** The plugin stops only a server that it started. It does so after
+  the idle timeout has passed without a search, when the plugin is turned off,
+  when the vault's window closes or Obsidian quits, and when the port, the QMD
+  path or the extra PATH directories setting changes. If Obsidian crashes and
+  leaves the server running, the plugin finds it at the next start, and either
+  goes on using it or stops it.
+
+One case is known in which a server the plugin started is left running: the
+server has stopped responding at the moment the window closes or Obsidian quits.
+`pgrep -fl "mcp --http --port 8181"` lists such a server, and it has to be
+killed by hand.
+
+## Models
+
+QMD searches with three local models, about 2 GB in all. The plugin never
+downloads or refreshes them on its own, and it never runs `qmd pull`. QMD
+fetches a model that is missing when it first needs it: the embedding model
+during the first index run, and the other two during the first search that needs
+them. On a machine that does not have the models yet, that first search is
+therefore slow, and it may fail after two minutes with the hint "If QMD is still
+downloading its models, try again in a few minutes."
+
+You can run `qmd pull` by hand to fetch the models beforehand. In QMD 2.8.3 it
+checks each model against huggingface.co, and it deletes the cached copy and
+downloads it again whenever that check fails. Offline, the check fails and the
+deleted model is not restored. That is why the plugin leaves `qmd pull` to you.
+
+## Server log
+
+A server that the plugin starts writes its output to
+`$TMPDIR/qmd-search-server-<port>.log`, which is `qmd-search-server-8181.log`
+with the default port. The log contains the text of your queries. The plugin
+creates it readable by your user only, and replaces it each time it starts a
+server. When a server fails to start, the pane shows the last lines of this log.
+
+## The index and its collection
+
+The plugin keeps the vault in a collection of QMD's default index, named by the
+"Collection name" setting, so `qmd` on the command line can search the vault
+too. It reindexes after notes have changed and the quiet period has passed, and
+once after it loads, to catch up on changes made while Obsidian was closed. A
+reindex runs `qmd update`, which scans every collection in the index and not
+only the vault's, and then `qmd embed` for the vault's collection. Until the
+first index run in a vault has finished, a search answers "The vault is still
+being indexed for the first time."
+
+The plugin creates the vault's collection when it is missing. It never removes,
+renames or edits a collection, so one is left behind when you change the
+collection name or stop using the plugin. To remove it:
+
+```sh
+qmd collection list
+qmd collection remove <name>
+```
+
+If the name already belongs to a collection that points at another folder, the
+plugin leaves that collection alone and reports
+`Index failed: collection "<name>" points at another folder`. Choose another
+name.
+
+## Development
+
+`make help` lists the commands. `AGENTS.md` holds the conventions and the rules
+that a change to this plugin must keep.
+
+[qmd]: https://github.com/tobi/qmd
+[prek]: https://prek.j178.dev/
