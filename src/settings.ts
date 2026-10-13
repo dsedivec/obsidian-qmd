@@ -67,6 +67,7 @@ export class QmdSearchSettingTab extends PluginSettingTab {
     // Obsidian can call this again while the tab is showing.
     this.stopStatus();
     this.containerEl.empty();
+    let clearTest = (): void => {};
     for (const { key, name, description } of FIELDS) {
       const setting = new Setting(this.containerEl)
         .setName(name)
@@ -85,9 +86,13 @@ export class QmdSearchSettingTab extends PluginSettingTab {
             .then(showSaved);
         // The DOM `change` event fires on blur or Enter. A keystroke changes nothing: a half-typed
         // collection name must never reach the settings, where the indexer would act on it.
-        text.inputEl.addEventListener("change", () => void commit());
+        text.inputEl.addEventListener("change", () => {
+          // What the last test found was about the command as it was before this change.
+          if (key === "qmdPath" || key === "extraPath") clearTest();
+          void commit();
+        });
       });
-      if (key === "qmdPath") this.addTest(setting, () => commit());
+      if (key === "qmdPath") clearTest = this.addTest(setting, () => commit());
       if (key === "port") this.addServerStatus();
     }
   }
@@ -97,16 +102,27 @@ export class QmdSearchSettingTab extends PluginSettingTab {
     super.hide();
   }
 
-  /** A button that runs `qmd --version` with the settings as they are, and says what came of it. */
-  private addTest(setting: Setting, commit: () => Promise<void>): void {
+  /**
+   * A button that runs `qmd --version` with the settings as they are, and says what came of it.
+   * Returns the function that takes that line away again, for when the command it was about
+   * changes.
+   */
+  private addTest(setting: Setting, commit: () => Promise<void>): () => void {
     const resultEl = setting.descEl.createDiv({
       cls: "qmd-search-setting-result",
     });
+    // Counts the tests and the clearings, so that a test overtaken by either shows nothing.
+    let latest = 0;
+    const show = (text: string, cls?: "is-ok" | "is-error"): void => {
+      resultEl.removeClass("is-ok", "is-error");
+      resultEl.setText(text);
+      if (cls) resultEl.addClass(cls);
+    };
     setting.addButton((button) =>
       button.setButtonText("Test").onClick(async () => {
+        const mine = ++latest;
         button.setDisabled(true);
-        resultEl.removeClass("is-ok", "is-error");
-        resultEl.setText("Testing…");
+        show("Testing…");
         try {
           // What is in the box is saved first, so that it is what gets tested.
           await commit();
@@ -115,17 +131,19 @@ export class QmdSearchSettingTab extends PluginSettingTab {
             await checkQmd(this.plugin.cli),
             qmdPath,
           );
-          resultEl.setText(text);
-          resultEl.addClass(ok ? "is-ok" : "is-error");
+          if (mine === latest) show(text, ok ? "is-ok" : "is-error");
         } catch (err) {
           console.error("QMD Search: could not test the QMD path", err);
-          resultEl.setText("The test could not be run.");
-          resultEl.addClass("is-error");
+          if (mine === latest) show("The test could not be run.", "is-error");
         } finally {
           button.setDisabled(false);
         }
       }),
     );
+    return () => {
+      latest++;
+      show("");
+    };
   }
 
   /** A line that says how the QMD server stands, read again every few seconds while the tab is open. */

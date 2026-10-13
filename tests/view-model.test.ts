@@ -96,6 +96,7 @@ describe("view-model", () => {
       "Not running. It starts with your next search.",
     ],
     [{ kind: "starting", port: 8181 }, "Starting…"],
+    [{ kind: "stopping", port: 8181 }, "Stopping…"],
     [
       { kind: "own", pid: 63207, port: 8181, answering: true },
       "Running on port 8181, started by this plugin (PID 63207).",

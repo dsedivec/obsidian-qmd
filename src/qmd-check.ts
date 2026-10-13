@@ -36,9 +36,9 @@ export async function checkQmd(cli: {
     : { kind: "found", version };
 }
 
-/** The first line the command wrote, to standard error for preference, or else how it ended. */
+/** The line that says why, from standard error for preference, or else how the command ended. */
 function failureDetail(result: CliResult): string {
-  const said = firstLine(result.stderr) ?? firstLine(result.stdout);
+  const said = reasonLine(result.stderr) ?? reasonLine(result.stdout);
   if (said !== undefined)
     return said.length > DETAIL_LIMIT
       ? `${said.slice(0, DETAIL_LIMIT)}…`
@@ -48,11 +48,16 @@ function failureDetail(result: CliResult): string {
     : `exit code ${result.code}`;
 }
 
-function firstLine(text: string): string | undefined {
-  return text
+/**
+ * The first line that names an error, as in `Error: Cannot find module`, or failing that the first
+ * line there is. Node puts the place an error was thrown before the error itself.
+ */
+function reasonLine(text: string): string | undefined {
+  const lines = text
     .split("\n")
     .map((line) => line.trim())
-    .find((line) => line !== "");
+    .filter((line) => line !== "");
+  return lines.find((line) => /^\w*Error: /.test(line)) ?? lines[0];
 }
 
 /** The line the settings tab shows for a check. `qmdPath` is the path that was run. */

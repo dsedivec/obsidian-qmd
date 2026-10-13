@@ -100,6 +100,23 @@ describe("checkQmd", () => {
       { kind: "failed", detail: "Error: Cannot find module 'x'" },
     ],
     [
+      "a Node error, whose reason comes after the place it was thrown",
+      {
+        code: 1,
+        stderr:
+          "node:internal/modules/cjs/loader:1921\n  throw err;\n  ^\n\nError: Cannot find module '/x/qmd.js'\n    at a (b.js:1)\n\nNode.js v26.5.0\n",
+      },
+      { kind: "failed", detail: "Error: Cannot find module '/x/qmd.js'" },
+    ],
+    [
+      "a failure of another kind of error",
+      {
+        code: 1,
+        stderr: "warning: slow disk\nTypeError: x is not a function\n",
+      },
+      { kind: "failed", detail: "TypeError: x is not a function" },
+    ],
+    [
       "a failure that says why on standard output only",
       { code: 2, stdout: "usage: qmd <command>\n" },
       { kind: "failed", detail: "usage: qmd <command>" },

@@ -36,6 +36,19 @@ import { SearchView, VIEW_TYPE } from "./view";
 /** A value may be as raw as the text of a settings field: `applySettingsPatch` decides what becomes of it. */
 type SettingsPatch = { [K in keyof QmdSearchSettings]?: unknown };
 
+/**
+ * The user's home folder, or "" when it cannot be told. `expandHome` then leaves a `~` as it is.
+ * `homedir` throws for a user with no `HOME` and no entry in the password database, and the
+ * settings are read where a throw would do harm.
+ */
+function homeFolder(): string {
+  try {
+    return homedir();
+  } catch {
+    return "";
+  }
+}
+
 /** Runs one step and logs a throw, so that a failing step never skips the ones after it. */
 function attempt(what: string, step: () => void): void {
   try {
@@ -187,7 +200,7 @@ export default class QmdSearchPlugin extends Plugin {
    * the extra PATH directories is the home folder. `settings` keeps what was typed.
    */
   effectiveSettings(): QmdSearchSettings {
-    return withHomeExpanded(this.settings, homedir());
+    return withHomeExpanded(this.settings, homeFolder());
   }
 
   /** `describeError` with the current QMD path and port. */

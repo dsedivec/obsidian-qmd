@@ -388,11 +388,18 @@ describe("expandHome", () => {
     },
   );
 
-  // "~/bin/qmd" must never become "/bin/qmd", which is some other program.
-  it.each([["~"], ["~/bin/qmd"]])(
-    "leaves %j as it is when the home folder is not known",
-    (path) => {
-      expect(expandHome(path, "")).toBe(path);
+  // Joined to a home folder that is not an absolute path, "~/bin/qmd" would name a file somewhere
+  // else: "./bin/qmd", run from /, is /bin/qmd, which is some other program.
+  it.each([
+    ["~", ""],
+    ["~/bin/qmd", ""],
+    ["~", "."],
+    ["~/bin/qmd", "."],
+    ["~/bin/qmd", "Users/alex"],
+  ])(
+    "leaves %j as it is when the home folder is %j, which is not an absolute path",
+    (path, home) => {
+      expect(expandHome(path, home)).toBe(path);
     },
   );
 });

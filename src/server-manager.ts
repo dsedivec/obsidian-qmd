@@ -57,6 +57,8 @@ export type ServerStatus =
   | { kind: "stopped"; port: number }
   /** A start is under way: it has found nothing answering and is bringing a server up. */
   | { kind: "starting"; port: number }
+  /** A server this manager has sent SIGTERM is still there, less than six seconds on. */
+  | { kind: "stopping"; port: number }
   /** A server this manager spawned or adopted. `answering` says whether it answered health just now. */
   | { kind: "own"; pid: number; port: number; answering: boolean }
   /** A server answers that this manager does not own. It is used, and never stopped. */
@@ -218,9 +220,9 @@ export class ServerManager {
 
   /**
    * Says how things stand on the port that is set, for the settings tab to show. It looks and
-   * changes nothing: one health check, no signal, no spawn, no timer touched, and nothing saved.
-   * Unlike a start, it leaves an owned server that does not answer as it is. It still works after
-   * `dispose`.
+   * changes nothing: one health check, no signal, no spawn, no timer touched, and nothing saved
+   * or forgotten. Unlike a start, it leaves an owned server that does not answer as it is. It
+   * still works after `dispose`.
    *
    * It does not make the adoption, which may signal. While an adoption that has begun is still
    * asking the recorded server, it waits for that to settle, so that a server about to be taken
@@ -232,12 +234,31 @@ export class ServerManager {
     const answering = await this.deps.health(port);
     // Read after the answer, so that the report is true of now.
     const owned = this.owned;
-    if (owned?.port === port)
+    // An owned server whose group is gone died unnoticed, and whatever answers now is not it.
+    if (owned?.port === port && this.deps.isAlive(owned.pid))
       return { kind: "own", pid: owned.pid, port, answering };
     // The attempt in flight has told its callers that it is starting a server: see `start`.
     if (this.attempt !== null && this.listeners === null)
       return { kind: "starting", port };
+    // A server this manager has just told to stop can still answer for a moment, and is not
+    // someone else's for that.
+    if (this.isStopping(port)) return { kind: "stopping", port };
     return answering ? { kind: "external", port } : { kind: "stopped", port };
+  }
+
+  /**
+   * True while a group this manager has sent SIGTERM for `port` is still there, for six seconds
+   * from that SIGTERM at most: by then the SIGKILL has landed, and a PID still alive could be
+   * another process's. Unlike `waitForStopped`, it forgets nothing.
+   */
+  private isStopping(port: number): boolean {
+    const now = performance.now();
+    return this.stopped.some(
+      (group) =>
+        group.port === port &&
+        now - group.at < STOPPED_WAIT_MS &&
+        this.deps.isAlive(group.pid),
+    );
   }
 
   /** Synchronous, so it is safe to call from `beforeunload`. */

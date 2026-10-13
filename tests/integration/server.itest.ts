@@ -13,6 +13,7 @@ import {
   type KeyValueStore,
   type QmdSearchSettings,
 } from "../../src/config";
+import { checkQmd } from "../../src/qmd-check";
 import { QmdCli } from "../../src/qmd-cli";
 import { QmdClient } from "../../src/qmd-client";
 import { toSearchResults } from "../../src/results";
@@ -224,6 +225,40 @@ describe("ServerManager with the real qmd", () => {
 
     owner.stopIfOwned();
     await waitFor(() => !groupAlive(pid), 10_000);
+    visitor.dispose();
+    owner.dispose();
+  });
+
+  it("finds the real qmd, and reads the version it prints", async () => {
+    const check = await checkQmd(cli);
+    expect(check).toEqual({
+      kind: "found",
+      version: expect.stringMatching(/^\d+\.\d+\.\d+/) as string,
+    });
+  });
+
+  it("says how the real server stands: stopped, its own, someone else's, stopped again", async () => {
+    const { port } = settings;
+    const { manager: owner, spawned } = newManager();
+    const { manager: visitor } = newManager();
+    expect(await owner.status()).toEqual({ kind: "stopped", port });
+
+    await owner.ensureRunning();
+    const pid = spawned[0].pid;
+    expect(await owner.status()).toEqual({
+      kind: "own",
+      pid,
+      port,
+      answering: true,
+    });
+    expect(await visitor.status()).toEqual({ kind: "external", port });
+    // Looking stopped nothing.
+    expect(await checkHealth(port)).toBe(true);
+
+    owner.stopIfOwned();
+    await waitFor(() => pid !== undefined && !groupAlive(pid), 10_000);
+    expect(await owner.status()).toEqual({ kind: "stopped", port });
+    expect(await visitor.status()).toEqual({ kind: "stopped", port });
     visitor.dispose();
     owner.dispose();
   });

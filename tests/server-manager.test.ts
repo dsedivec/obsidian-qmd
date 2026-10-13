@@ -3471,7 +3471,7 @@ describe("ServerManager reporting the server's status", () => {
     expect(s.spawned).toEqual([]);
   });
   it("says stopped, not starting, once a stop has cancelled the start", async () => {
-    const { deps } = fake({ healthy: false });
+    const { deps } = fake({ healthy: false, diesOn: "SIGTERM" });
     const m = new ServerManager(deps);
     const done = watch(m.ensureRunning());
     await flush();
@@ -3517,11 +3517,105 @@ describe("ServerManager reporting the server's status", () => {
     await flush();
     expect(seen).toEqual(OWN_777);
   });
-  it("speaks of the port that is set: a server it owns on another port is not the one there", async () => {
+  it("asks the port that is set: a server it owns on another port is not the one there", async () => {
+    const { deps, s } = fake({ healthy: false, healthyAfterPolls: 1 });
+    const m = new ServerManager(deps);
+    const done = m.ensureRunning();
+    await vi.advanceTimersByTimeAsync(250);
+    await done;
+    // From here on only the owned server's port answers.
+    const asked: number[] = [];
+    deps.health = (port) => {
+      asked.push(port);
+      return Promise.resolve(port === 8181);
+    };
+    s.settings = { port: 9000, idleTimeoutMinutes: 60 };
+    expect(await m.status()).toEqual({ kind: "stopped", port: 9000 });
+    expect(asked).toEqual([9000]);
+    expect(s.killed).toEqual([]);
+  });
+  it("does not call a server its own once its group is gone, and forgets nothing itself", async () => {
+    const { deps, s } = fake(recordedAndAlive);
+    const m = new ServerManager(deps);
+    await m.adoptIfOurs();
+    // An adopted server has no launcher whose exit would tell the manager. Another server has
+    // taken the port since.
+    s.alive = [];
+    expect(await m.status()).toEqual({ kind: "external", port: 8181 });
+    s.healthy = false;
+    expect(await m.status()).toEqual({ kind: "stopped", port: 8181 });
+    expect(s.killed).toEqual([]);
+    expect(s.record).toEqual({ pid: 777, port: 8181 });
+  });
+  it("says stopping of a server it has told to stop, for as long as that server is still there", async () => {
     const { m, s } = await started();
+    m.stopIfOwned();
+    // Sent SIGTERM a moment ago, and for now it still answers.
+    expect(await m.status()).toEqual({ kind: "stopping", port: 8181 });
+    s.healthy = false;
+    expect(await m.status()).toEqual({ kind: "stopping", port: 8181 });
+    s.alive = [];
+    expect(await m.status()).toEqual({ kind: "stopped", port: 8181 });
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+  it("says stopping when the stop lands while it is still asking", async () => {
+    const { m, s } = await started();
+    s.deferHealth = true;
+    let seen: ServerStatus | undefined;
+    void m.status().then((status) => {
+      seen = status;
+    });
+    m.stopIfOwned();
+    s.answerHealth(true);
+    await flush();
+    expect(seen).toEqual({ kind: "stopping", port: 8181 });
+  });
+  it("says stopping for six seconds at most: after that the server is not this manager's to speak for", async () => {
+    const { m } = await started();
+    m.stopIfOwned();
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(await m.status()).toEqual({ kind: "stopping", port: 8181 });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await m.status()).toEqual({ kind: "external", port: 8181 });
+  });
+  it("does not say stopping of a server it stopped on another port", async () => {
+    const { m, s } = await started();
+    m.stopIfOwned();
     s.settings = { port: 9000, idleTimeoutMinutes: 60 };
     expect(await m.status()).toEqual({ kind: "external", port: 9000 });
-    expect(s.killed).toEqual([]);
+  });
+  it("says stopped, not starting, after a start has failed", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const done = watch(m.ensureRunning());
+    await flush();
+    s.exit({ code: 1 });
+    await flush();
+    expect(done.state).toBe("rejected");
+    expect(await m.status()).toEqual({ kind: "stopped", port: 8181 });
+  });
+  it("does not say starting of a later search's first check, after an earlier start had got as far as starting", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    await flush();
+    s.exit({ code: 1 });
+    await flush();
+    expect(first.state).toBe("rejected");
+    // A server has since been started by other means.
+    s.healthy = true;
+    s.deferHealth = true;
+    let seen: ServerStatus | undefined;
+    void m.status().then((status) => {
+      seen = status;
+    });
+    const second = m.ensureRunning();
+    s.answerHealth(true);
+    await flush();
+    expect(seen).toEqual({ kind: "external", port: 8181 });
+    s.answerHealth(true);
+    await second;
+    expect(s.spawned).toEqual([8181]);
   });
   it("still answers after dispose", async () => {
     const { m } = await started();

@@ -51,6 +51,8 @@ export function serverStatusText(status: ServerStatus): string {
       return "Not running. It starts with your next search.";
     case "starting":
       return "Starting…";
+    case "stopping":
+      return "Stopping…";
     case "own":
       return status.answering
         ? `Running on port ${status.port}, started by this plugin (PID ${status.pid}).`

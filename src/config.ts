@@ -170,11 +170,11 @@ export function applySettingsPatch(
 /**
  * `path` with a leading `~` read as the user's home folder: `~` alone, or `~/` and what follows.
  * Nothing else is expanded: not another user's `~name`, not a `~` further in, not a variable.
- * A home folder that is not known leaves the path as it is, so that `~/bin/qmd` can never come to
- * mean `/bin/qmd`.
+ * A home folder that is not known, or is not an absolute path, leaves the path as it is: joined to
+ * an empty or a relative home, `~/bin/qmd` would name a file outside it, such as `/bin/qmd`.
  */
 export function expandHome(path: string, home: string): string {
-  if (home === "") return path;
+  if (!home.startsWith("/")) return path;
   if (path === "~") return home;
   if (!path.startsWith("~/")) return path;
   return home.replace(/\/+$/, "") + path.slice(1);
