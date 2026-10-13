@@ -64,18 +64,18 @@ interface StoppedGroup { pid: number; port: number; at: number }
  *
  * It never spawns on a port while a group it has itself sent SIGTERM for that port is still
  * alive: such a group holds the port, and the new server could not bind it. Every SIGTERM is
- * remembered in `stopped`, and a start waits for those groups first. Nor does it spawn while it
- * owns a server: a start that has waited asks for health again, and stops what it has come to
- * own meanwhile, before it goes on.
+ * remembered in `stopped`, and a start waits for those groups first. A start that has waited
+ * asks for health again before it spawns, and uses a server that answers by then. Nor does it
+ * spawn while it owns a server: a start stops the owned one first, and nothing comes to be owned
+ * while a start is under way.
  *
- * A start waits for an adoption that is in progress. `ensureRunning` asks nothing and spawns
- * nothing until that `adoptIfOurs` has settled, so the server on record has been adopted,
- * stopped or struck from the record before the start decides anything. The start then goes on as
- * usual: an adopted server answers its health check, and a stopped one is a group to wait for.
- * The other way round there is no waiting: an adoption that begins while a start is in progress
- * runs beside it, and stands down, leaving the record, for a server that start has spawned. That
- * order is one of the known limits; the plugin calls `adoptIfOurs` once, at load, before any
- * start.
+ * The saved record is settled once, and before any start decides anything. `adoptIfOurs` does
+ * it: the first call does the work, and every later call returns the same promise. The plugin
+ * calls it at load, and every start begins by calling it, so it does not matter which comes
+ * first. While the adoption is asking the recorded server for health, a start waits; by its own
+ * first health check that server has been adopted, stopped or struck from the record. The start
+ * then goes on as usual: an adopted server answers, and a stopped one is a group to wait for.
+ * With no saved record, or one that is cleared at once, there is nothing to wait for.
  *
  * `stopIfOwned` and `dispose` also overtake work that is waiting: on a health answer, for a
  * stopped server to be gone, for a recorded server to answer, or for an adoption to settle. A
@@ -105,8 +105,10 @@ export class ServerManager {
   private holds = 0;
   /** Ends each `poll` in progress. `stopIfOwned` and `dispose` call them all. */
   private readonly polls = new Set<() => void>();
-  /** The adoptions in progress, each as a promise that resolves when it has settled, whichever way. */
-  private readonly adoptions = new Set<Promise<void>>();
+  /** The one adoption this manager makes, once it has begun. */
+  private adoption: Promise<void> | undefined;
+  /** True while that adoption is asking the recorded server for health. A start waits for it then. */
+  private adopting = false;
 
   constructor(private readonly deps: ServerDeps) {}
 
@@ -177,47 +179,52 @@ export class ServerManager {
    * Crash recovery, for a server recorded by an earlier session. One that answers health is taken
    * back as owned. One that does not answer within three seconds, and is this port's server by
    * its command line, is stopped: nothing else would ever stop it. Otherwise the record is
-   * cleared and nothing is signalled. A start that begins before this has settled waits for it.
+   * cleared and nothing is signalled.
+   *
+   * It is made once. The first call does the work and every later call returns the same promise;
+   * every start begins by calling it, so the first call is the plugin's at load or the first
+   * start's, whichever comes first.
    */
-  async adoptIfOurs(): Promise<void> {
-    let settle = (): void => {};
-    const settled = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
-    this.adoptions.add(settled);
+  adoptIfOurs(): Promise<void> {
+    this.adoption ??= this.adopt();
+    return this.adoption;
+  }
+
+  /**
+   * Decides before it returns whatever needs no waiting: with no record, or with a record that
+   * cannot be this port's server, the adoption has settled by then, and a start goes straight on
+   * to its health check. Only a record that is worth asking for health sets `adopting`.
+   */
+  private adopt(): Promise<void> {
     try {
-      await this.adopt();
-    } finally {
-      // Before this call's own promise settles, so that a caller who awaited it finds no adoption
-      // in progress.
-      this.adoptions.delete(settled);
-      settle();
+      if (this.disposed) return Promise.resolve();
+      const record = this.deps.loadRecord();
+      if (!record) return Promise.resolve();
+      // A group signal to PID 0 or 1 would reach the group of this process, or every process. Such
+      // a record is discarded before anything is asked about its PID.
+      const adoptable =
+        isUsablePid(record.pid) && record.port === this.deps.getSettings().port && this.looksLikeQmdServer(record.pid);
+      if (!adoptable) {
+        this.deps.saveRecord(null);
+        return Promise.resolve();
+      }
+      this.adopting = true;
+      return this.settleRecorded(record).finally(() => {
+        this.adopting = false;
+      });
+    } catch (error) {
+      return Promise.reject(error);
     }
   }
 
-  private async adopt(): Promise<void> {
-    if (this.disposed) return;
-    const record = this.deps.loadRecord();
-    if (!record) return;
-    // A group signal to PID 0 or 1 would reach the group of this process, or every process. Such
-    // a record is discarded before anything is asked about its PID.
-    if (!isUsablePid(record.pid)) {
-      this.deps.saveRecord(null);
-      return;
-    }
-    // A server this session spawned takes precedence, and its outcome settles the record.
-    if (this.owned || this.pending) return;
-    if (record.port !== this.deps.getSettings().port || !this.looksLikeQmdServer(record.pid)) {
-      this.deps.saveRecord(null);
-      return;
-    }
+  /** Gives the recorded server its three seconds to answer, then owns it or stops it. */
+  private async settleRecorded(record: OwnedRecord): Promise<void> {
     const stops = this.stops;
     // A fair chance to answer: a server that is busy for a moment is still worth keeping.
     const answered = await this.poll(() => this.deps.health(record.port), ADOPT_WAIT_MS);
     // Overtaken by a stop or a shutdown: own nothing, signal nothing, and leave the record for a
-    // later session.
+    // later session. Nothing of this session can be owned or starting here: every start waits.
     if (this.disposed || this.stops !== stops) return;
-    if (this.owned || this.pending) return;
     if (answered) this.own(record);
     // Hung, and never owned by this session. With no health answer to vouch for it, it is
     // signalled only if its command line names this very port; the record is cleared either way.
@@ -244,11 +251,15 @@ export class ServerManager {
   private async start(listeners: StatusListener[]): Promise<void> {
     const { port } = this.deps.getSettings();
     const stops = this.stops;
-    // An adoption in progress settles first: until the server on record has been adopted, stopped
-    // or struck from the record, a health answer cannot be told from that server's, and a spawn
-    // could land beside it. A stop or a shutdown ends the adoption's own wait, and so this one.
-    if (this.adoptions.size > 0) {
-      await Promise.all(this.adoptions);
+    // The saved record is settled first, by the one adoption, made here if it has not been made
+    // yet: until the server on record has been adopted, stopped or struck from the record, a
+    // health answer cannot be told from that server's, and a spawn could land beside it. There is
+    // something to wait for only while the adoption is asking that server for health; a stop or a
+    // shutdown ends that wait of the adoption's, and so this one. An adoption that fails does not
+    // fail the start: whoever calls `adoptIfOurs` is given the same failure.
+    const adoption = this.adoptIfOurs().catch(() => {});
+    if (this.adopting) {
+      await adoption;
       if (this.disposed || this.stops !== stops) throw this.overtaken();
     }
     const healthy = await this.deps.health(port);
@@ -260,23 +271,23 @@ export class ServerManager {
     if (this.listeners === listeners) this.listeners = null;
     for (const listener of listeners) listener("starting");
     // A group this manager has stopped holds the port until it is gone, whichever stop it was:
-    // the one just above, the idle timer, `stopIfOwned`, the stop at load, or a failed start. One
+    // the one just above, the idle timer, `stopIfOwned`, the adoption's, or a failed start. One
     // that does not act on SIGTERM goes at the SIGKILL; past its six seconds the spawn is tried
-    // anyway. Asked again after each wait, because a group can be stopped during one.
-    for (let wait = this.waitForStopped(port); wait > 0; wait = this.waitForStopped(port)) {
+    // anyway. One wait covers every such group: none can be stopped on this port during it.
+    const wait = this.waitForStopped(port);
+    if (wait > 0) {
       await this.poll(() => this.waitForStopped(port) === 0, wait);
       if (this.disposed || this.stops !== stops) throw this.overtaken();
-      // Time has passed, so what the first health check found may no longer hold. A server may
-      // answer now: one that an adoption has come to own meanwhile, or another program's. It is
-      // used as it is, owned or not, and nothing is spawned.
+      // Time has passed, so what the first health check found may no longer hold: another program
+      // may have started a server on the port meanwhile. It is used as it is, and nothing is
+      // spawned.
       const answers = await this.deps.health(port);
       if (this.disposed || this.stops !== stops) throw this.overtaken();
       if (answers) return;
-      // A server that came to be owned during the wait and does not answer is stopped like the
-      // one before it, and waited for in its turn.
-      this.stopOwned();
     }
-    // Nothing is owned here: `stopOwned` ran since the last health answer, with no await after it.
+    // Nothing is owned here. `stopOwned` ran above, and nothing can come to be owned while a start
+    // waits: only the adoption or a start owns, the adoption settled before the first health
+    // check, and another start means that this one was overtaken.
     const server = this.deps.spawnServer(port);
     const outcome = await this.untilStarted(port, server);
     if (outcome === "healthy") {
