@@ -21,6 +21,8 @@ export interface ServerDeps {
 const HEALTH_POLL_MS = 250;
 const STARTUP_LIMIT_MS = 60_000;
 const KILL_GRACE_MS = 5_000;
+const SHUT_DOWN = "The QMD server manager was shut down.";
+const CANCELLED = "The QMD server start was cancelled.";
 
 type Timer = ReturnType<typeof setTimeout>;
 type StatusListener = (status: "starting") => void;
@@ -34,14 +36,22 @@ type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
  * `adoptIfOurs` (held in `owned`). A server that merely answers health is neither, and is never
  * signalled. An owned PID is checked again right before SIGTERM, and forgotten as soon as its
  * launcher is seen to exit, so a PID that died and was reused is not signalled either.
+ *
+ * `stopIfOwned` and `dispose` also overtake work that is waiting on a health answer: a start
+ * does not go on to spawn, and an adoption does not go on to own. After `dispose` the manager
+ * spawns nothing, owns nothing new and arms no timer; only `stopIfOwned` still acts.
  */
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
   private owned: OwnedRecord | null = null;
-  /** The server this manager spawned that has not answered health yet. */
+  /** The server this manager spawned that has not answered health yet and has not exited. */
   private pending: { pid: number | undefined; abort(): void } | null = null;
+  /** The attempt that `ensureRunning` calls join, with the callers waiting to hear whether it spawns. */
   private attempt: Promise<void> | null = null;
   private listeners: StatusListener[] = [];
+  /** Counts `stopIfOwned` calls, so work that awaited a health answer can tell it was overtaken. */
+  private stops = 0;
+  private disposed = false;
   private idleTimer: Timer | undefined;
   private readonly killTimers = new Set<Timer>();
 
@@ -49,63 +59,86 @@ export class ServerManager {
 
   /** Resolves once a server answers. Concurrent calls share one attempt. */
   ensureRunning(onStatus?: StatusListener): Promise<void> {
+    if (this.disposed) return Promise.reject(new QmdSearchError("server-start", SHUT_DOWN));
+    if (!this.attempt) {
+      const listeners: StatusListener[] = [];
+      const attempt: Promise<void> = this.start(listeners).finally(() => {
+        if (this.attempt === attempt) this.attempt = null;
+      });
+      this.attempt = attempt;
+      this.listeners = listeners;
+    }
     if (onStatus) {
       if (this.pending) onStatus("starting");
       else this.listeners.push(onStatus);
     }
-    this.attempt ??= this.start().finally(() => {
-      this.attempt = null;
-      this.listeners = [];
-    });
     return this.attempt;
   }
 
   /** Restarts the idle timer of an owned server. */
   noteActivity(): void {
     clearTimeout(this.idleTimer);
-    if (!this.owned) return;
+    if (this.disposed || !this.owned) return;
     const { idleTimeoutMinutes } = this.deps.getSettings();
     this.idleTimer = setTimeout(() => this.stopOwned(), idleTimeoutMinutes * 60_000);
   }
 
   /** Synchronous, so it is safe to call from `beforeunload`. */
   stopIfOwned(): void {
-    this.stopOwned();
+    // Overtake a start or adoption that is waiting on a health answer, and detach the attempt in
+    // flight so that a call made from now on begins a fresh one.
+    this.stops++;
+    this.attempt = null;
     const starting = this.pending;
-    if (!starting) return;
-    starting.abort();
-    // Spawned moments ago and not yet exited, so this PID needs no identity check.
-    if (starting.pid !== undefined) this.terminate(starting.pid);
+    this.pending = null;
+    starting?.abort();
+    // Returned by `spawnServer` and not yet exited, so this PID needs no identity check.
+    if (starting?.pid !== undefined) this.terminate(starting.pid);
+    this.stopOwned();
   }
 
   /** Crash recovery: takes back a server recorded by an earlier session, or clears the record. */
   async adoptIfOurs(): Promise<void> {
+    if (this.disposed) return;
     const record = this.deps.loadRecord();
     if (!record) return;
+    // A group signal to PID 0 or 1 would reach the group of this process, or every process. Such
+    // a record is discarded before anything is asked about its PID.
+    if (!Number.isInteger(record.pid) || record.pid <= 1) {
+      this.deps.saveRecord(null);
+      return;
+    }
+    const stops = this.stops;
     const ours =
       record.port === this.deps.getSettings().port &&
       this.looksLikeQmdServer(record.pid) &&
       (await this.deps.health(record.port));
+    // Overtaken by a stop or a shutdown: own nothing, and leave the record for a later session.
+    if (this.disposed || this.stops !== stops) return;
     // A server this session spawned takes precedence, and its outcome settles the record.
     if (this.owned || this.pending) return;
     if (ours) this.own(record);
     else this.deps.saveRecord(null);
   }
 
-  /** Clears every timer and signals nothing. */
+  /** Clears every timer, signals nothing, and leaves the manager shut down for good. */
   dispose(): void {
+    this.disposed = true;
     clearTimeout(this.idleTimer);
     for (const timer of this.killTimers) clearTimeout(timer);
     this.killTimers.clear();
     this.pending?.abort();
   }
 
-  private async start(): Promise<void> {
+  private async start(listeners: StatusListener[]): Promise<void> {
     const { port } = this.deps.getSettings();
-    if (await this.deps.health(port)) return;
+    const stops = this.stops;
+    const healthy = await this.deps.health(port);
+    if (this.disposed || this.stops !== stops) throw this.overtaken();
+    if (healthy) return;
     // An owned server that does not answer is stopped and replaced.
     this.stopOwned();
-    for (const listener of this.listeners) listener("starting");
+    for (const listener of listeners) listener("starting");
     const server = this.deps.spawnServer(port);
     const outcome = await this.untilStarted(port, server);
     if (outcome === "healthy") {
@@ -114,10 +147,11 @@ export class ServerManager {
       this.own(record);
       // Once the launcher has exited its PID can be reused, so it must not stay on record.
       void server.exit.then(() => {
-        if (this.owned === record) this.forget();
+        if (this.owned === record && !this.disposed) this.forget();
       });
       return;
     }
+    if (outcome === "stopped") throw this.overtaken();
     // As above: this PID has not exited since `spawnServer` returned it, so there is no identity check.
     if (outcome === "timeout" && server.pid !== undefined) this.terminate(server.pid);
     const tail = this.deps.logTail(port);
@@ -130,12 +164,17 @@ export class ServerManager {
     return new Promise((resolve) => {
       let settled = false;
       let pollTimer: Timer | undefined;
+      const release = (): void => {
+        if (this.pending === pending) this.pending = null;
+      };
       const settle = (outcome: StartOutcome): void => {
         if (settled) return;
         settled = true;
         clearTimeout(pollTimer);
         clearTimeout(deadline);
-        this.pending = null;
+        // A stopped start keeps its PID on hand: `stopIfOwned` takes it at once, and `dispose`
+        // leaves it for a `stopIfOwned` that may follow.
+        if (outcome !== "stopped") release();
         resolve(outcome);
       };
       const poll = (): void => {
@@ -148,18 +187,28 @@ export class ServerManager {
         }, HEALTH_POLL_MS);
       };
       const deadline = setTimeout(() => settle("timeout"), STARTUP_LIMIT_MS);
-      this.pending = { pid: server.pid, abort: () => settle("stopped") };
-      void server.exit.then(settle);
+      const pending = { pid: server.pid, abort: (): void => settle("stopped") };
+      this.pending = pending;
+      void server.exit.then((exit) => {
+        release(); // Even after `dispose` stopped the wait: an exited PID must not be signalled.
+        settle(exit);
+      });
       poll();
     });
   }
 
-  /** Forgets the owned server and, if its PID still looks like a QMD server, stops it. */
+  /** Why a start that `stopIfOwned` or `dispose` overtook fails. */
+  private overtaken(): QmdSearchError {
+    return new QmdSearchError("server-start", this.disposed ? SHUT_DOWN : CANCELLED);
+  }
+
+  /** Stops the owned server if its PID still looks like a QMD server, and forgets it either way. */
   private stopOwned(): void {
     const record = this.owned;
     if (!record) return;
-    this.forget();
+    // Signal before clearing the record: a save that throws must not leave the server running.
     if (this.looksLikeQmdServer(record.pid)) this.terminate(record.pid);
+    this.forget();
   }
 
   /**
@@ -173,9 +222,10 @@ export class ServerManager {
     return commandLine !== null && commandLine.includes("qmd") && commandLine.includes("mcp");
   }
 
-  /** SIGTERM now, SIGKILL five seconds later unless `dispose` clears it first. */
+  /** SIGTERM now, SIGKILL five seconds later unless `dispose` clears it first or already ran. */
   private terminate(pid: number): void {
     this.deps.killGroup(pid, "SIGTERM");
+    if (this.disposed) return;
     // Unconditional: the launcher is gone by now, so its PID says nothing about the server it
     // spawned, and `killGroup` does nothing once the whole group is gone.
     const timer = setTimeout(() => {
@@ -193,7 +243,6 @@ export class ServerManager {
 
   private forget(): void {
     clearTimeout(this.idleTimer);
-    if (!this.owned) return;
     this.owned = null;
     this.deps.saveRecord(null);
   }

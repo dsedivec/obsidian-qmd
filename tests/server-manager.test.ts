@@ -3,6 +3,8 @@ import { ServerManager, type OwnedRecord, type ServerDeps, type SpawnExit } from
 
 const MIN = 60_000;
 const QMD_CMD = "node /x/bin/qmd mcp --http --port 8181";
+const CANCELLED = "The QMD server start was cancelled.";
+const SHUT_DOWN = "The QMD server manager was shut down.";
 
 interface FakeOptions {
   healthy: boolean;
@@ -15,6 +17,10 @@ interface FakeOptions {
   alive: number[];
   /** The command line reported for every PID. */
   cmd: string | null;
+  /** While true, each health check stays unanswered until `answerHealth` is called for it. */
+  deferHealth: boolean;
+  /** While true, `saveRecord` throws. */
+  saveThrows: boolean;
 }
 
 interface FakeState extends FakeOptions {
@@ -23,6 +29,9 @@ interface FakeState extends FakeOptions {
   killed: Array<[number, "SIGTERM" | "SIGKILL"]>;
   /** Spawns and signals in the order they happened, as "spawn 4242" and "SIGTERM 4242". */
   events: string[];
+  healthCalls: number;
+  /** Answers the oldest health check that `deferHealth` is holding open. */
+  answerHealth(healthy: boolean): void;
   /**
    * Makes a spawned server exit: the latest one, or the one at index `which` in spawn order.
    * Called before any spawn, it applies to the first server as soon as it is spawned.
@@ -34,6 +43,7 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
   let pollsLeft: number | undefined;
   let earlyExit: SpawnExit | undefined;
   const servers: Array<{ pid: number | undefined; resolve(result: SpawnExit): void }> = [];
+  const heldHealth: Array<(healthy: boolean) => void> = [];
   const s: FakeState = {
     healthy: false,
     healthyAfterPolls: undefined,
@@ -41,12 +51,20 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
     record: null,
     log: "",
     cmd: QMD_CMD,
+    deferHealth: false,
+    saveThrows: false,
     ...over,
     alive: [...(over.alive ?? [])],
     settings: { port: 8181, idleTimeoutMinutes: 60 },
     spawned: [],
     killed: [],
     events: [],
+    healthCalls: 0,
+    answerHealth(healthy) {
+      const answer = heldHealth.shift();
+      if (!answer) throw new Error("no health check is waiting for an answer");
+      answer(healthy);
+    },
     exit(result, which = servers.length - 1) {
       const server = servers[which];
       if (!server) {
@@ -59,12 +77,14 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
   };
   const deps: ServerDeps = {
     getSettings: () => s.settings,
-    health: async () => {
+    health: () => {
+      s.healthCalls++;
+      if (s.deferHealth) return new Promise<boolean>((resolve) => heldHealth.push(resolve));
       if (!s.healthy && pollsLeft !== undefined && --pollsLeft <= 0) {
         s.healthy = true;
         pollsLeft = undefined;
       }
-      return s.healthy;
+      return Promise.resolve(s.healthy);
     },
     spawnServer: (port) => {
       const pid = s.spawnPid;
@@ -88,6 +108,7 @@ function fake(over: Partial<FakeOptions> = {}): { deps: ServerDeps; s: FakeState
     },
     loadRecord: () => s.record,
     saveRecord: (record) => {
+      if (s.saveThrows) throw new Error("storage unavailable");
       s.record = record;
     },
   };
@@ -103,6 +124,18 @@ async function started(over: Partial<FakeOptions> = {}): Promise<{ m: ServerMana
   await done;
   return { m, s };
 }
+
+/** Follows a promise without awaiting it, so a test fails rather than hangs when it never settles. */
+function watch(promise: Promise<void>): { state: "pending" | "resolved" | "rejected"; error?: unknown } {
+  const seen: { state: "pending" | "resolved" | "rejected"; error?: unknown } = { state: "pending" };
+  promise.then(
+    () => { seen.state = "resolved"; },
+    (error: unknown) => { seen.state = "rejected"; seen.error = error; },
+  );
+  return seen;
+}
+
+const flush = (): Promise<unknown> => vi.advanceTimersByTimeAsync(0);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -578,5 +611,218 @@ describe("ServerManager adopting", () => {
     m.stopIfOwned();
     await failed;
     expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toEqual(saved);
+  });
+});
+
+describe("ServerManager overtaken while it waits for a health answer", () => {
+  const interruptions = {
+    "stopIfOwned": { act: (m: ServerManager) => { m.stopIfOwned(); }, message: CANCELLED },
+    "dispose": { act: (m: ServerManager) => { m.dispose(); }, message: SHUT_DOWN },
+    "stopIfOwned then dispose": { act: (m: ServerManager) => { m.stopIfOwned(); m.dispose(); }, message: SHUT_DOWN },
+    "dispose then stopIfOwned": { act: (m: ServerManager) => { m.dispose(); m.stopIfOwned(); }, message: SHUT_DOWN },
+  };
+  const cases: Array<[keyof typeof interruptions, boolean]> = [];
+  for (const name of Object.keys(interruptions) as Array<keyof typeof interruptions>) cases.push([name, false], [name, true]);
+
+  it.each(cases)("%s during the first health check stops the start before it spawns (health then answers %j)", async (name, answer) => {
+    const { deps, s } = fake({ deferHealth: true });
+    const m = new ServerManager(deps);
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    interruptions[name].act(m);
+    s.deferHealth = false;
+    s.answerHealth(answer);
+    await flush();
+    expect(call.state).toBe("rejected");
+    expect(call.error).toMatchObject({ kind: "server-start", message: interruptions[name].message });
+    expect(s.spawned).toEqual([]); expect(onStatus).not.toHaveBeenCalled();
+    expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.spawned).toEqual([]); expect(s.killed).toEqual([]);
+  });
+  it("gives a call made right after stopIfOwned a fresh attempt, not the cancelled one", async () => {
+    const { deps, s } = fake({ deferHealth: true, healthyAfterPolls: 1 });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    m.stopIfOwned();
+    const onStatus = vi.fn();
+    const second = watch(m.ensureRunning(onStatus));
+    expect(s.healthCalls).toBe(2);
+    s.answerHealth(false);
+    await flush();
+    expect(first.state).toBe("rejected"); expect(first.error).toMatchObject({ kind: "server-start", message: CANCELLED });
+    expect(second.state).toBe("pending"); expect(s.spawned).toEqual([]);
+    const third = watch(m.ensureRunning());
+    expect(s.healthCalls).toBe(2); // joined the fresh attempt: the cancelled one settling did not detach it
+    s.deferHealth = false;
+    s.answerHealth(false);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(second.state).toBe("resolved"); expect(third.state).toBe("resolved");
+    expect(onStatus).toHaveBeenCalledTimes(1); expect(onStatus).toHaveBeenCalledWith("starting");
+    expect(s.spawned).toEqual([8181]); expect(s.record).toEqual({ pid: 4242, port: 8181 });
+  });
+  it("spawns on the new port, not the old one, when the port changes during the first health check", async () => {
+    const { deps, s } = fake({ deferHealth: true, healthyAfterPolls: 1 });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    s.settings.port = 9000;
+    m.stopIfOwned();
+    const second = watch(m.ensureRunning());
+    expect(s.healthCalls).toBe(2);
+    s.deferHealth = false;
+    s.answerHealth(false); s.answerHealth(false);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(first.state).toBe("rejected"); expect(second.state).toBe("resolved");
+    expect(s.spawned).toEqual([9000]); expect(s.record).toEqual({ pid: 4242, port: 9000 });
+  });
+  it("gives a call made right after stopIfOwned a fresh attempt when the stopped one had already spawned", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const first = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.stopIfOwned();
+    s.healthyAfterPolls = 1; s.spawnPid = 5151;
+    const second = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(250);
+    expect(second.state).toBe("resolved");
+    expect(s.events).toEqual(["spawn 4242", "SIGTERM 4242", "spawn 5151"]); expect(s.record).toEqual({ pid: 5151, port: 8181 });
+    expect(first.state).toBe("rejected"); expect(first.error).toMatchObject({ kind: "server-start", message: CANCELLED });
+  });
+  it.each(cases)("%s while adoption waits for health leaves the server unowned and its record alone (health then answers %j)", async (name, answer) => {
+    const saved = { pid: 777, port: 8181 };
+    const { deps, s } = fake({ deferHealth: true, record: saved, alive: [777] });
+    const m = new ServerManager(deps);
+    const adopting = watch(m.adoptIfOurs());
+    interruptions[name].act(m);
+    s.deferHealth = false; s.healthy = answer;
+    s.answerHealth(answer);
+    await flush();
+    expect(adopting.state).toBe("resolved");
+    expect(s.record).toEqual(saved); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]); expect(s.record).toEqual(saved);
+  });
+});
+
+describe("ServerManager shut down in the same tick as a call", () => {
+  it("spawns nothing after ensureRunning, stopIfOwned, dispose", async () => {
+    const { deps, s } = fake({ healthy: false, healthyAfterPolls: 1 });
+    const m = new ServerManager(deps);
+    const call = watch(m.ensureRunning());
+    m.stopIfOwned(); m.dispose();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(call.state).toBe("rejected");
+    expect(s.spawned).toEqual([]); expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
+  });
+  it("owns nothing after adoptIfOurs, stopIfOwned, dispose", async () => {
+    const saved = { pid: 777, port: 8181 };
+    const { deps, s } = fake({ healthy: true, record: saved, alive: [777] });
+    const m = new ServerManager(deps);
+    const adopting = m.adoptIfOurs();
+    m.stopIfOwned(); m.dispose();
+    await adopting;
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.killed).toEqual([]); expect(s.record).toEqual(saved);
+  });
+});
+
+describe("ServerManager after dispose", () => {
+  it("rejects ensureRunning without checking health or spawning", async () => {
+    const { deps, s } = fake({ healthy: false, healthyAfterPolls: 1 });
+    const m = new ServerManager(deps);
+    m.dispose();
+    const onStatus = vi.fn();
+    const call = watch(m.ensureRunning(onStatus));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(call.state).toBe("rejected");
+    expect(call.error).toMatchObject({ kind: "server-start", message: SHUT_DOWN });
+    expect(s.healthCalls).toBe(0); expect(s.spawned).toEqual([]); expect(onStatus).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("arms no idle timer on noteActivity", async () => {
+    const { m, s } = await started();
+    m.dispose(); m.noteActivity();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([]);
+  });
+  it("does not adopt", async () => {
+    const saved = { pid: 777, port: 8181 };
+    const { deps, s } = fake({ healthy: true, record: saved, alive: [777] });
+    const m = new ServerManager(deps);
+    m.dispose();
+    await m.adoptIfOurs();
+    expect(s.healthCalls).toBe(0); expect(vi.getTimerCount()).toBe(0); expect(s.record).toEqual(saved);
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(s.killed).toEqual([]);
+  });
+  it("still stops its server on stopIfOwned, as when dispose comes second, and arms no timer", async () => {
+    const { m, s } = await started();
+    m.dispose(); m.stopIfOwned();
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+  });
+  it.each([
+    ["stopIfOwned then dispose", (m: ServerManager) => { m.stopIfOwned(); m.dispose(); }],
+    ["dispose then stopIfOwned", (m: ServerManager) => { m.dispose(); m.stopIfOwned(); }],
+  ])("stops a server that is still starting on %s", async (_name, shutDown) => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    shutDown(m);
+    await flush();
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(vi.getTimerCount()).toBe(0);
+    expect(call.state).toBe("rejected"); expect(call.error).toMatchObject({ kind: "server-start" });
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+  });
+  it("does not signal a server that was still starting at dispose and has exited since", async () => {
+    const { deps, s } = fake({ healthy: false });
+    const m = new ServerManager(deps);
+    const call = watch(m.ensureRunning());
+    await vi.advanceTimersByTimeAsync(1000);
+    m.dispose();
+    s.exit({ code: 1 });
+    await flush();
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]);
+    expect(call.state).toBe("rejected"); expect(call.error).toMatchObject({ kind: "server-start", message: SHUT_DOWN });
+  });
+  it("leaves the saved record alone when its server exits later", async () => {
+    const { m, s } = await started();
+    m.dispose();
+    s.exit({ code: 0 });
+    await flush();
+    expect(s.record).toEqual({ pid: 4242, port: 8181 });
+  });
+});
+
+describe("ServerManager with a failing store or a bad record", () => {
+  it("signals its server even when clearing the record throws", async () => {
+    const { m, s } = await started();
+    s.saveThrows = true;
+    expect(() => m.stopIfOwned()).toThrow("storage unavailable");
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+    s.saveThrows = false;
+    m.stopIfOwned();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
+  });
+  it.each([0, 1, -5, 1.5, NaN])("clears a record whose pid is %s without looking the process up or signalling", async (pid) => {
+    const { deps, s } = fake({ healthy: true, record: { pid, port: 8181 }, alive: [pid] });
+    const isAlive = vi.spyOn(deps, "isAlive");
+    const commandLine = vi.spyOn(deps, "commandLine");
+    const m = new ServerManager(deps);
+    await m.adoptIfOurs();
+    expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
+    expect(isAlive).not.toHaveBeenCalled(); expect(commandLine).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    m.stopIfOwned();
+    expect(s.killed).toEqual([]);
   });
 });
