@@ -49,7 +49,8 @@ type StartOutcome = "healthy" | "timeout" | "stopped" | SpawnExit;
  *
  * `stopIfOwned` and `dispose` also overtake work that is waiting on a health answer: a start
  * does not go on to spawn, and an adoption does not go on to own. After `dispose` the manager
- * spawns nothing, owns nothing new and arms no timer; only `stopIfOwned` still acts.
+ * spawns nothing, owns nothing new and never arms the idle timer again; only `stopIfOwned` still
+ * acts. A SIGKILL follow-up is the one timer `dispose` leaves alone.
  */
 export class ServerManager {
   /** The running server this manager spawned or adopted. */
@@ -63,7 +64,6 @@ export class ServerManager {
   private stops = 0;
   private disposed = false;
   private idleTimer: Timer | undefined;
-  private readonly killTimers = new Set<Timer>();
 
   constructor(private readonly deps: ServerDeps) {}
 
@@ -131,12 +131,18 @@ export class ServerManager {
     else this.deps.saveRecord(null);
   }
 
-  /** Clears every timer, signals nothing, and leaves the manager shut down for good. */
+  /**
+   * Shuts the manager down for good. It clears the idle timer and the startup timers, fails a
+   * start that is waiting, and sends no signal. From then on `ensureRunning` rejects, and
+   * `noteActivity` and `adoptIfOurs` do nothing; `stopIfOwned` still works.
+   *
+   * It does not cancel a SIGKILL follow-up: a server that ignores SIGTERM must still be killed
+   * after the plugin unloads. When Obsidian itself quits, the page goes away and that timer never
+   * fires.
+   */
   dispose(): void {
     this.disposed = true;
     clearTimeout(this.idleTimer);
-    for (const timer of this.killTimers) clearTimeout(timer);
-    this.killTimers.clear();
     this.pending?.abort();
   }
 
@@ -242,16 +248,11 @@ export class ServerManager {
     return commandLines.split("\n").some((line) => line.includes("qmd") && line.includes("mcp"));
   }
 
-  /** SIGTERM now, SIGKILL five seconds later unless `dispose` clears it first or already ran. */
+  /** SIGTERM now, SIGKILL five seconds later. Nothing cancels the SIGKILL, `dispose` included. */
   private terminate(pid: number): void {
     this.deps.killGroup(pid, "SIGTERM");
-    if (this.disposed) return;
     // Unconditional: `killGroup` does nothing once the whole group is gone.
-    const timer = setTimeout(() => {
-      this.killTimers.delete(timer);
-      this.deps.killGroup(pid, "SIGKILL");
-    }, KILL_GRACE_MS);
-    this.killTimers.add(timer);
+    setTimeout(() => this.deps.killGroup(pid, "SIGKILL"), KILL_GRACE_MS);
   }
 
   private own(record: OwnedRecord): void {

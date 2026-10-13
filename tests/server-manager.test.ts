@@ -325,7 +325,7 @@ describe("ServerManager starting", () => {
     await vi.advanceTimersByTimeAsync(120 * MIN);
     expect(s.killed).toHaveLength(2); expect(s.record).toBeNull();
   });
-  it("dispose clears the force-kill that follows giving up", async () => {
+  it("still force-kills five seconds after giving up when dispose follows", async () => {
     const { deps, s } = fake({ healthy: false });
     const m = new ServerManager(deps);
     const done = m.ensureRunning();
@@ -333,9 +333,12 @@ describe("ServerManager starting", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await failed;
     m.dispose();
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(120 * MIN);
+    await vi.advanceTimersByTimeAsync(4999);
     expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toHaveLength(2);
   });
   it("starts again on the next call after a failed start", async () => {
     const { deps, s } = fake({ healthy: false });
@@ -614,12 +617,16 @@ describe("ServerManager stopping", () => {
     await vi.advanceTimersByTimeAsync(120 * MIN);
     expect(s.killed).toEqual([]); expect(s.record).toEqual({ pid: 4242, port: 8181 });
   });
-  it("dispose after stopIfOwned cancels the force-kill, as on unload", async () => {
+  it("still force-kills five seconds after stopIfOwned when dispose follows, as on plugin unload", async () => {
     const { m, s } = await started();
     m.stopIfOwned(); m.dispose();
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(4999);
     expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toHaveLength(2);
   });
 });
 
@@ -839,12 +846,16 @@ describe("ServerManager after dispose", () => {
     await vi.advanceTimersByTimeAsync(60 * MIN);
     expect(s.killed).toEqual([]);
   });
-  it("still stops its server on stopIfOwned, as when dispose comes second, and arms no timer", async () => {
+  it("still stops its server on stopIfOwned, force-kill included, as when dispose comes second", async () => {
     const { m, s } = await started();
     m.dispose(); m.stopIfOwned();
-    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull(); expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    await vi.advanceTimersByTimeAsync(4999);
     expect(s.killed).toEqual([[4242, "SIGTERM"]]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120 * MIN);
+    expect(s.killed).toHaveLength(2);
   });
   it.each([
     ["stopIfOwned then dispose", (m: ServerManager) => { m.stopIfOwned(); m.dispose(); }],
@@ -856,11 +867,14 @@ describe("ServerManager after dispose", () => {
     await vi.advanceTimersByTimeAsync(1000);
     shutDown(m);
     await flush();
-    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(vi.getTimerCount()).toBe(0);
+    // One timer is left: the force-kill. The startup poll and deadline are gone.
+    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(vi.getTimerCount()).toBe(1);
     expect(call.state).toBe("rejected"); expect(call.error).toMatchObject({ kind: "server-start" });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(s.killed).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]]);
     await vi.advanceTimersByTimeAsync(120 * MIN);
     m.stopIfOwned();
-    expect(s.killed).toEqual([[4242, "SIGTERM"]]); expect(s.record).toBeNull();
+    expect(s.killed).toHaveLength(2); expect(s.record).toBeNull();
   });
   it("does not signal a server that was still starting at dispose and has exited since", async () => {
     const { deps, s } = fake({ healthy: false });
