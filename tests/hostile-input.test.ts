@@ -2,16 +2,25 @@
 // starts every process from an argument array and runs no shell; these tests fail if that changes.
 // A string that could run a command would create the sentinel file, which nothing else ever does.
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import * as http from "node:http";
-import type { AddressInfo } from "node:net";
+import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deriveCollectionName, isValidCollectionName, sanitizeSettings } from "../src/config";
+import {
+  DEFAULT_SETTINGS,
+  deriveCollectionName,
+  isValidCollectionName,
+  sanitizeSettings,
+  type KeyValueStore,
+  type QmdSearchSettings,
+} from "../src/config";
 import { QmdCli } from "../src/qmd-cli";
 import { QmdClient } from "../src/qmd-client";
 import { SearchService } from "../src/search-service";
+import { createServerDeps, serverLogPath } from "../src/server-deps";
 
 const hostile = (sentinel: string) => [
   `$(touch ${sentinel})`,
@@ -38,14 +47,27 @@ const T = { timeoutMs: 5000 };
 let tmp: string;
 let sentinel: string;
 let strings: string[];
+/** A directory whose path is hostile too, holding a copy of the fake named `qmd`. */
+let hostileDir: string;
 
 const expectNoSentinel = (): void =>
   expect(existsSync(sentinel), "a shell ran the text as a command, which created the sentinel").toBe(false);
+
+/** The fake's report of these arguments: their number, then each one, all ending in a NUL. */
+const report = (...args: string[]): string[] => [String(args.length), ...args, ""];
 
 beforeAll(() => {
   tmp = mkdtempSync(join(tmpdir(), "qmd-search-hostile-"));
   sentinel = join(tmp, "sentinel");
   strings = hostile(sentinel);
+
+  // A space, `$HOME`, a backtick pair and a single quote. The pair holds the sentinel's whole
+  // path, so that running it would create the sentinel; the slashes in that path make this a
+  // chain of directories, one inside the other, all of them under the temp directory.
+  hostileDir = join(tmp, `has space $HOME \`touch ${sentinel}\` it's`);
+  mkdirSync(hostileDir, { recursive: true });
+  copyFileSync(FAKE, join(hostileDir, "qmd"));
+  chmodSync(join(hostileDir, "qmd"), 0o755);
 });
 
 // Removed after each test, so that a sentinel one test let through is not held against the next.
@@ -55,8 +77,6 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 describe("QmdCli", () => {
   const cli = (qmdPath = FAKE, extraPath = "") => new QmdCli(() => ({ qmdPath, extraPath }));
-  /** What the fake's `args` case prints for these arguments: their number, then each one, all ending in a NUL. */
-  const report = (...args: string[]): string[] => [String(args.length), ...args, ""];
 
   it.each(CASES)("passes %j to qmd as one argument, byte for byte", async (_name, index) => {
     const text = strings[index];
@@ -73,32 +93,47 @@ describe("QmdCli", () => {
     expect(result.stdout.split("\0")).toEqual(report(...strings));
   });
 
-  describe("with shell metacharacters in a configured path", () => {
-    let hostileDir: string;
+  it("runs a qmd whose own path contains shell metacharacters", async () => {
+    const result = await cli(join(hostileDir, "qmd")).run(["args", "ran"], T);
+    expectNoSentinel();
+    expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
+    expect(result.stdout.split("\0")).toEqual(report("ran"));
+  });
 
-    beforeAll(() => {
-      // A space, `$HOME`, a backtick pair and a single quote. The pair holds the sentinel's whole
-      // path, so that running it would create the sentinel; the slashes in that path make this a
-      // chain of directories, one inside the other, all of them under the temp directory.
-      hostileDir = join(tmp, `has space $HOME \`touch ${sentinel}\` it's`);
-      mkdirSync(hostileDir, { recursive: true });
-      copyFileSync(FAKE, join(hostileDir, "qmd"));
-      chmodSync(join(hostileDir, "qmd"), 0o755);
-    });
+  it("puts an extra PATH directory that contains shell metacharacters on PATH as it is written", async () => {
+    const result = await cli(FAKE, hostileDir).run(["path"], T);
+    expectNoSentinel();
+    expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
+    expect(result.stdout.split(":").slice(0, 2)).toEqual([dirname(FAKE), hostileDir]);
+  });
+});
 
-    it("runs a qmd whose own path contains them", async () => {
-      const result = await cli(join(hostileDir, "qmd")).run(["args", "ran"], T);
+// The other place the plugin starts `qmd`: the server, from the same two settings.
+describe("createServerDeps", () => {
+  it("starts the server from a qmd path and a PATH that contain shell metacharacters", async () => {
+    // Held open for the whole test, so that the log file its number names is this test's alone.
+    const held = net.createServer();
+    await new Promise<void>((done) => held.listen(0, "localhost", done));
+    const { port } = held.address() as net.AddressInfo;
+    const qmdPath = join(hostileDir, "qmd");
+    const settings: QmdSearchSettings = { ...DEFAULT_SETTINGS, qmdPath, extraPath: hostileDir, port };
+    const store: KeyValueStore = { get: () => undefined, set: () => {} };
+    const deps = createServerDeps({ cli: new QmdCli(() => settings), getSettings: () => settings, store });
+
+    const server = deps.spawnServer(port);
+    try {
+      // The fake reports its arguments and exits. The timer only bounds a failure.
+      const exit = await Promise.race([server.exit, sleep(3000, "still running", { ref: false })]);
       expectNoSentinel();
-      expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
-      expect(result.stdout.split("\0")).toEqual(report("ran"));
-    });
-
-    it("puts an extra PATH directory that contains them on PATH as it is written", async () => {
-      const result = await cli(FAKE, hostileDir).run(["path"], T);
-      expectNoSentinel();
-      expect(result).toMatchObject({ code: 0, stderr: "", timedOut: false });
-      expect(result.stdout.split(":").slice(0, 2)).toEqual([dirname(FAKE), hostileDir]);
-    });
+      // The log is the server's output: the fake names the path it was run by, then its arguments.
+      const log = readFileSync(serverLogPath(port), "utf8").split("\0");
+      expect({ exit, log }).toEqual({ exit: { code: 0 }, log: [qmdPath, ...report("mcp", "--http", "--port", String(port))] });
+    } finally {
+      if (server.pid !== undefined) deps.killGroup(server.pid, "SIGKILL");
+      await server.exit;
+      rmSync(serverLogPath(port), { force: true });
+      await new Promise<void>((done) => held.close(() => done()));
+    }
   });
 });
 
@@ -120,7 +155,7 @@ describe("QmdClient", () => {
       });
     });
     await new Promise<void>((done) => server.listen(0, "localhost", done));
-    const { port } = server.address() as AddressInfo;
+    const { port } = server.address() as net.AddressInfo;
     client = new QmdClient(() => port);
   });
 
